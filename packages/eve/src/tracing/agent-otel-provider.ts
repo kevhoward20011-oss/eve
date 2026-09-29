@@ -31,7 +31,10 @@ import { createAgentChannelDeliveryInstrumentation } from "#tracing/agent-channe
 import { createAgentToolInstrumentation } from "#tracing/agent-tool-instrumentation.js";
 import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
 import { markAgentTraceContext } from "#tracing/agent-trace-context.js";
-import { agentTraceIdentityAttributes } from "#tracing/agent-otel-attributes.js";
+import {
+  agentTraceIdentityAttributes,
+  modelCallCompletedAttributes,
+} from "#tracing/agent-otel-attributes.js";
 import * as runtimeAttributes from "#tracing/agent-otel-runtime-context.js";
 import { createAgentMemoryInstrumentation } from "#tracing/agent-memory-instrumentation.js";
 import {
@@ -420,15 +423,10 @@ export function createAgentOtelInstrumentation(
       state.span.setAttribute("gen_ai.response.finish_reasons", [event.finishReason]);
       const attempt = steps.get(event.scope);
       if (attempt !== undefined) setAgentUsage(attempt.span, event.usage);
-      state.span.setAttribute(
-        "agent.trace.content.output",
-        recordOutputs && event.content !== undefined,
-      );
-      if (event.gateway?.generationId !== undefined) {
-        state.span.setAttribute("gen_ai.generation.id", event.gateway.generationId);
-      }
-      if (event.gateway?.transcriptsEnabled === true) {
-        state.span.setAttribute("vercel.ai_gateway.transcript.enabled", true);
+      for (const [key, value] of Object.entries(
+        modelCallCompletedAttributes(event, recordOutputs),
+      )) {
+        state.span.setAttribute(key, value);
       }
       if (recordOutputs) {
         state.span.setAttribute("ai.response.finish_reason", event.finishReason);
