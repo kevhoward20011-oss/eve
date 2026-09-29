@@ -116,7 +116,7 @@ describe("Gateway trace propagation middleware", () => {
       }),
     );
 
-    await apiContext.with(suppressTracing(activeContext) as unknown as Context, () =>
+    await apiContext.with(suppressTracing(activeContext) as Context, () =>
       model.doGenerate({
         prompt: [{ content: [{ text: "hello", type: "text" }], role: "user" }],
       }),
