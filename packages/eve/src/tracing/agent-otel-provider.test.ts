@@ -3001,24 +3001,27 @@ describe("createAgentOtelInstrumentation", () => {
     {
       name: "captured Gateway call",
       metadata: { gateway: { generationId: "gen_123", transcripts: { enabled: true } } },
-      generationId: "gen_123",
-      enabled: true,
+      expectedAttributes: {
+        "gen_ai.generation.id": "gen_123",
+        "vercel.ai_gateway.transcript.enabled": true,
+      },
+      absentKeys: [],
     },
     {
       name: "Gateway call without transcript metadata",
       metadata: { gateway: { generationId: "gen_123" } },
-      generationId: "gen_123",
-      enabled: undefined,
+      expectedAttributes: { "gen_ai.generation.id": "gen_123" },
+      absentKeys: ["vercel.ai_gateway.transcript.enabled"],
     },
     {
       name: "non-Gateway call",
       metadata: { anthropic: { cacheCreationInputTokens: 0 } },
-      generationId: undefined,
-      enabled: undefined,
+      expectedAttributes: {},
+      absentKeys: ["gen_ai.generation.id", "vercel.ai_gateway.transcript.enabled"],
     },
   ])(
     "reports chat identifiers and content flags for a $name",
-    async ({ metadata, generationId, enabled }) => {
+    async ({ metadata, expectedAttributes, absentKeys }) => {
       const startedAttributes: Record<string, unknown>[] = [];
       const runtime = createRuntime(undefined, undefined, [
         {
@@ -3048,13 +3051,9 @@ describe("createAgentOtelInstrumentation", () => {
       expect(model.attributes).toMatchObject({
         "agent.trace.content.input": true,
         "agent.trace.content.output": true,
+        ...expectedAttributes,
       });
-      if (generationId === undefined)
-        expect(model.attributes).not.toHaveProperty("gen_ai.generation.id");
-      else expect(model.attributes["gen_ai.generation.id"]).toBe(generationId);
-      if (enabled === undefined)
-        expect(model.attributes).not.toHaveProperty("vercel.ai_gateway.transcript.enabled");
-      else expect(model.attributes["vercel.ai_gateway.transcript.enabled"]).toBe(true);
+      for (const key of absentKeys) expect(model.attributes).not.toHaveProperty(key);
       await runtime.provider.shutdown();
     },
   );
