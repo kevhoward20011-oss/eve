@@ -369,6 +369,7 @@ export function createAgentOtelInstrumentation(
       modelSpanName(event.model.modelId),
       {
         attributes: {
+          "agent.trace.content.input": recordInputs && event.input !== undefined,
           "gen_ai.agent.name": event.scope.functionId,
           "gen_ai.operation.name": "chat",
           "gen_ai.provider.name": event.model.provider,
@@ -419,6 +420,16 @@ export function createAgentOtelInstrumentation(
       state.span.setAttribute("gen_ai.response.finish_reasons", [event.finishReason]);
       const attempt = steps.get(event.scope);
       if (attempt !== undefined) setAgentUsage(attempt.span, event.usage);
+      state.span.setAttribute(
+        "agent.trace.content.output",
+        recordOutputs && event.content !== undefined,
+      );
+      if (event.gateway?.generationId !== undefined) {
+        state.span.setAttribute("gen_ai.generation.id", event.gateway.generationId);
+      }
+      if (event.gateway?.transcriptsEnabled === true) {
+        state.span.setAttribute("vercel.ai_gateway.transcript.enabled", true);
+      }
       if (recordOutputs) {
         state.span.setAttribute("ai.response.finish_reason", event.finishReason);
         const content = event.content;

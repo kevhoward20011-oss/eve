@@ -438,6 +438,11 @@ export interface InstrumentationModelCallCompletedEvent {
   /** Content. Absent unless this provider's trace policy records this direction. */
   readonly content?: readonly InstrumentationContentPart[];
   readonly finishReason: string;
+  /** AI Gateway identifiers for this call; absent for non-Gateway models. */
+  readonly gateway?: {
+    readonly generationId?: string;
+    readonly transcriptsEnabled?: boolean;
+  };
   readonly idempotencyKey: string;
   readonly responseModelId?: string;
   readonly responseId?: string;
