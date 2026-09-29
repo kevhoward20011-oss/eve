@@ -143,8 +143,9 @@ Each turn starts a new trace. The first subagent trace links to its caller with
 `eve.link.type=agent.dispatch`; the link is not an authorization grant. For a
 remote agent, `trustedForwarders` lets the receiver accept the sender's session
 lineage and trace-content policy. See [Remote agents](../guides/remote-agents#preserving-trace-content).
-Gateway-routed model requests include the active span's W3C `traceparent`, so
-Gateway spans join the `eve` turn trace.
+Gateway-routed model calls propagate the configured OpenTelemetry context at
+each provider request. Eve-owned baggage is removed before forwarding. Gateway
+controls whether its spans are sampled and which destinations receive them.
 Use `gen_ai.conversation.id` to find the traces for one conversation in your
 destination's span-search surface.
 

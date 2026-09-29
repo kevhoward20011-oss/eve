@@ -1,4 +1,4 @@
-import { ROOT_CONTEXT, trace } from "#compiled/@opentelemetry/api/index.js";
+import { gateway } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 
@@ -7,6 +7,7 @@ import {
   AI_GATEWAY_MODELS_URL,
   vercelGatewayFetch,
   resolveProviderHeaders,
+  withGatewayTraceContext,
 } from "#internal/gateway.js";
 
 describe("Gateway endpoints", () => {
@@ -38,25 +39,6 @@ describe("resolveProviderHeaders", () => {
     });
   });
 
-  it("forwards the active trace context to Gateway model requests", () => {
-    const traceId = "1".repeat(32);
-    const spanId = "2".repeat(16);
-    const activeContext = trace.setSpan(
-      ROOT_CONTEXT,
-      trace.wrapSpanContext({
-        isRemote: true,
-        spanId,
-        traceFlags: 1,
-        traceId,
-      }),
-    );
-
-    expect(resolveProviderHeaders("anthropic/claude-sonnet-4-5", activeContext)).toEqual({
-      traceparent: `00-${traceId}-${spanId}-01`,
-      "user-agent": expect.stringMatching(/^eve\/.+/),
-    });
-  });
-
   it("returns the eve user-agent for gateway model instances", () => {
     const model = new MockLanguageModelV3({
       provider: "gateway.language-model",
@@ -72,15 +54,29 @@ describe("resolveProviderHeaders", () => {
       provider: "anthropic.messages",
       modelId: "claude-sonnet-4-5",
     });
-    const activeContext = trace.setSpan(
-      ROOT_CONTEXT,
-      trace.wrapSpanContext({
-        isRemote: true,
-        spanId: "2".repeat(16),
-        traceFlags: 1,
-        traceId: "1".repeat(32),
-      }),
-    );
-    expect(resolveProviderHeaders(model, activeContext)).toBeUndefined();
+    expect(resolveProviderHeaders(model)).toBeUndefined();
+  });
+});
+
+describe("withGatewayTraceContext", () => {
+  it("wraps a Gateway model id resolved through the default provider", () => {
+    vi.stubGlobal("AI_SDK_DEFAULT_PROVIDER", gateway);
+    try {
+      const model = withGatewayTraceContext("anthropic/claude-sonnet-4-5");
+      expect(model).toMatchObject({
+        modelId: "anthropic/claude-sonnet-4-5",
+        provider: "gateway",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("leaves a direct provider model unchanged", () => {
+    const model = new MockLanguageModelV3({
+      provider: "anthropic.messages",
+      modelId: "claude-sonnet-4-5",
+    });
+    expect(withGatewayTraceContext(model)).toBe(model);
   });
 });

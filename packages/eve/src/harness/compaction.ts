@@ -11,6 +11,7 @@ import {
 } from "#harness/compaction-prompt.js";
 import { createFrameworkUserMessage, isFrameworkUserMessage } from "#harness/messages.js";
 import { estimateTokens } from "#harness/token-estimate.js";
+import { withGatewayTraceContext } from "#internal/gateway.js";
 import type { RuntimeModelReference } from "#runtime/agent/bootstrap.js";
 import type { CompactionConfig, ToolLoopHarnessConfig } from "#harness/types.js";
 
@@ -251,7 +252,7 @@ export async function compactMessages(
       abortSignal,
       headers,
       messages: [createFrameworkUserMessage("context.compaction", summaryPrompt.prompt)],
-      model,
+      model: withGatewayTraceContext(model),
       providerOptions,
       system: summaryPrompt.system,
       telemetry: telemetry ? { ...telemetry, functionId: "eve.compaction" } : undefined,

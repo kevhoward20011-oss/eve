@@ -1,8 +1,7 @@
-import { context as otelContext, trace } from "#compiled/@opentelemetry/api/index.js";
-import { formatTraceparent } from "#protocol/traceparent.js";
-import type { LanguageModel } from "ai";
+import { gateway, wrapLanguageModel, type LanguageModel } from "ai";
 
 import { appendPackageUserAgent, withPackageUserAgent } from "#internal/user-agent.js";
+import { gatewayTraceContextMiddleware } from "#tracing/gateway-model-trace-middleware.js";
 
 const GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
 
@@ -26,19 +25,22 @@ export const vercelGatewayFetch: typeof globalThis.fetch = withPackageUserAgent(
  * instances) get the eve User-Agent product token so AI Gateway can attribute
  * the traffic; direct-provider models get no extra headers.
  */
-export function resolveProviderHeaders(
-  model: LanguageModel,
-  activeContext = otelContext.active(),
-): Record<string, string> | undefined {
+export function resolveProviderHeaders(model: LanguageModel): Record<string, string> | undefined {
   if (!isGatewayModel(model)) return undefined;
-  const headers = appendPackageUserAgent(new Headers());
-  const traceparent = formatTraceparent(trace.getSpan(activeContext)?.spanContext());
-  if (traceparent !== undefined) headers.set("traceparent", traceparent);
-  return Object.fromEntries(headers);
+  return Object.fromEntries(appendPackageUserAgent(new Headers()));
 }
 
 export function isGatewayModel(model: LanguageModel): boolean {
   return typeof model === "string" || model.provider?.split(".")[0] === "gateway";
+}
+
+export function withGatewayTraceContext(model: LanguageModel): LanguageModel {
+  const resolvedModel =
+    typeof model === "string"
+      ? (globalThis.AI_SDK_DEFAULT_PROVIDER ?? gateway).languageModel(model)
+      : model;
+  if (!isGatewayModel(resolvedModel)) return model;
+  return wrapLanguageModel({ model: resolvedModel, middleware: gatewayTraceContextMiddleware });
 }
 
 /** Groups Gateway generations under the same identity used by eve's agent spans. */
