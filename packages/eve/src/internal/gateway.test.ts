@@ -1,3 +1,4 @@
+import { ROOT_CONTEXT, trace } from "#compiled/@opentelemetry/api/index.js";
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 
@@ -37,6 +38,25 @@ describe("resolveProviderHeaders", () => {
     });
   });
 
+  it("forwards the active trace context to Gateway model requests", () => {
+    const traceId = "1".repeat(32);
+    const spanId = "2".repeat(16);
+    const activeContext = trace.setSpan(
+      ROOT_CONTEXT,
+      trace.wrapSpanContext({
+        isRemote: true,
+        spanId,
+        traceFlags: 1,
+        traceId,
+      }),
+    );
+
+    expect(resolveProviderHeaders("anthropic/claude-sonnet-4-5", activeContext)).toEqual({
+      traceparent: `00-${traceId}-${spanId}-01`,
+      "user-agent": expect.stringMatching(/^eve\/.+/),
+    });
+  });
+
   it("returns the eve user-agent for gateway model instances", () => {
     const model = new MockLanguageModelV3({
       provider: "gateway.language-model",
@@ -52,6 +72,15 @@ describe("resolveProviderHeaders", () => {
       provider: "anthropic.messages",
       modelId: "claude-sonnet-4-5",
     });
-    expect(resolveProviderHeaders(model)).toBeUndefined();
+    const activeContext = trace.setSpan(
+      ROOT_CONTEXT,
+      trace.wrapSpanContext({
+        isRemote: true,
+        spanId: "2".repeat(16),
+        traceFlags: 1,
+        traceId: "1".repeat(32),
+      }),
+    );
+    expect(resolveProviderHeaders(model, activeContext)).toBeUndefined();
   });
 });
