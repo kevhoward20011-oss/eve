@@ -19,12 +19,12 @@ import {
 import { createGateway, type ModelMessage } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { compactMessages } from "#harness/compaction.js";
-import { withGatewayTraceContext } from "#internal/gateway.js";
+import { resolveGatewayTraceContextHeaders } from "#internal/gateway.js";
 import { suppressTracing } from "#tracing/suppress-tracing.js";
 
 const TRACE_ID = "1".repeat(32);
 
-describe("Gateway trace propagation middleware", () => {
+describe("Gateway trace propagation", () => {
   beforeEach(() => {
     apiContext.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
     apiPropagation.setGlobalPropagator(
@@ -37,6 +37,7 @@ describe("Gateway trace propagation middleware", () => {
   afterEach(() => {
     apiPropagation.disable();
     apiContext.disable();
+    vi.unstubAllGlobals();
   });
 
   it("injects the active call context for each generate and stream request", async () => {
@@ -50,11 +51,9 @@ describe("Gateway trace propagation middleware", () => {
       }
       return new Response("{}", { headers: { "content-type": "application/json" } });
     });
-    const model = withGatewayTraceContext(
-      createGateway({ apiKey: "gateway-test", fetch: fetcher }).languageModel(
-        "anthropic/claude-sonnet-4-5",
-      ),
-    ) as LanguageModelV4;
+    const gatewayProvider = createGateway({ apiKey: "gateway-test", fetch: fetcher });
+    vi.stubGlobal("AI_SDK_DEFAULT_PROVIDER", gatewayProvider);
+    const model = gatewayProvider.languageModel("anthropic/claude-sonnet-4-5") as LanguageModelV4;
     const callOptions: LanguageModelV4CallOptions = {
       headers: { "x-eve-test": "preserved" },
       prompt: [{ content: [{ text: "hello", type: "text" }], role: "user" }],
@@ -79,10 +78,32 @@ describe("Gateway trace propagation middleware", () => {
         baggage,
       );
 
-    await apiContext.with(contextFor("2".repeat(16)), () => model.doGenerate(callOptions));
-    await apiContext.with(contextFor("3".repeat(16)), () => model.doGenerate(callOptions));
+    await apiContext.with(contextFor("2".repeat(16)), () =>
+      model.doGenerate({
+        ...callOptions,
+        headers: resolveGatewayTraceContextHeaders(
+          "anthropic/claude-sonnet-4-5",
+          callOptions.headers,
+        ),
+      }),
+    );
+    await apiContext.with(contextFor("3".repeat(16)), () =>
+      model.doGenerate({
+        ...callOptions,
+        headers: resolveGatewayTraceContextHeaders(
+          "anthropic/claude-sonnet-4-5",
+          callOptions.headers,
+        ),
+      }),
+    );
     const stream = await apiContext.with(contextFor("4".repeat(16)), () =>
-      model.doStream(callOptions),
+      model.doStream({
+        ...callOptions,
+        headers: resolveGatewayTraceContextHeaders(
+          "anthropic/claude-sonnet-4-5",
+          callOptions.headers,
+        ),
+      }),
     );
     await stream.stream.cancel();
 
@@ -101,10 +122,8 @@ describe("Gateway trace propagation middleware", () => {
       requestHeaders.push(new Headers(init?.headers));
       return new Response("{}", { headers: { "content-type": "application/json" } });
     });
-    const model = withGatewayTraceContext(
-      createGateway({ apiKey: "gateway-test", fetch: fetcher }).languageModel(
-        "anthropic/claude-sonnet-4-5",
-      ),
+    const model = createGateway({ apiKey: "gateway-test", fetch: fetcher }).languageModel(
+      "anthropic/claude-sonnet-4-5",
     ) as LanguageModelV4;
     const activeContext = apiTrace.setSpan(
       ROOT_CONTEXT,
@@ -118,6 +137,7 @@ describe("Gateway trace propagation middleware", () => {
 
     await apiContext.with(suppressTracing(activeContext) as Context, () =>
       model.doGenerate({
+        headers: resolveGatewayTraceContextHeaders(model),
         prompt: [{ content: [{ text: "hello", type: "text" }], role: "user" }],
       }),
     );
