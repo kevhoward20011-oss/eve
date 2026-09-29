@@ -13,4 +13,5 @@ export default defineAgent({
     if (marker === undefined) return "APPROVAL-RESUME-MISSING-MARKER";
     return { toolCalls: [{ input: { marker }, name: TOOL_NAME }] };
   }),
+  modelContextWindowTokens: 1_000_000,
 });
