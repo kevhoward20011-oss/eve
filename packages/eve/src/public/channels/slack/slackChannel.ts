@@ -26,6 +26,7 @@ import type {
 import {
   buildSlackBinding,
   buildSlackWorkspaceHandle,
+  callSlackApi,
   slackContinuationToken,
   type SlackBotToken,
   type SlackHandle,
@@ -841,6 +842,54 @@ export function slackChannel(config: SlackChannelConfig = {}): SlackChannel {
   >({
     kindHint: "slack",
     turnPolicy: config.turnPolicy,
+    mintPersonalTarget: async (auth) => {
+      const userId = slackUserIdFromAuthContext(auth);
+      if (userId === undefined)
+        throw new Error("Slack personal schedule target requires Slack user auth.");
+      const teamId = auth.attributes.team_id;
+      const installationTeamId = typeof teamId === "string" ? teamId : undefined;
+      const response = await callSlackApi({
+        botToken: config.credentials?.botToken,
+        context: { teamId: installationTeamId },
+        operation: "conversations.open",
+        body: { users: userId },
+      });
+      const channel =
+        response.ok === true ? (response.channel as { id?: unknown } | undefined)?.id : undefined;
+      if (typeof channel !== "string" || channel.length === 0)
+        throw new Error(`Slack conversations.open failed: ${response.error ?? "unknown_error"}`);
+      const recipient: Record<string, string> = { user_id: userId };
+      const target: Record<string, string> = { channelId: channel };
+      if (installationTeamId !== undefined) {
+        recipient.team_id = installationTeamId;
+        target.installationTeamId = installationTeamId;
+      }
+      return {
+        channel: "slack",
+        continuationToken: slackContinuationToken(channel, ""),
+        delivery: "personal",
+        recipient,
+        target,
+      };
+    },
+    captureScheduleTarget: ({ state, mode = "thread" }) => {
+      const channelId = state.channelId;
+      if (typeof channelId !== "string" || channelId.length === 0)
+        throw new Error("Slack schedule delivery requires a current channel destination.");
+      const installationTeamId = state.installationTeamId;
+      const target: Record<string, string> = { channelId };
+      if (typeof installationTeamId === "string") target.installationTeamId = installationTeamId;
+      if (mode === "thread") {
+        const threadTs = state.threadTs || state.triggeringMessageTs;
+        if (typeof threadTs === "string" && threadTs.length > 0) target.threadTs = threadTs;
+      }
+      return {
+        channel: "slack",
+        continuationToken: slackContinuationToken(channelId, target.threadTs ?? ""),
+        delivery: "channel",
+        target,
+      };
+    },
     state: {
       channelId: null as string | null,
       threadTs: null as string | null,
@@ -914,7 +963,6 @@ export function slackChannel(config: SlackChannelConfig = {}): SlackChannel {
     receive(input, { from }) {
       return receiveOnSlack(input, { from, api, credentials: config.credentials });
     },
-
     events,
   });
   const credentials = config.credentials as { readonly vercelConnect?: unknown } | undefined;
@@ -940,6 +988,7 @@ async function receiveOnSlack(
     readonly message: string | UserContent;
     readonly target: SlackReceiveTarget;
     readonly title?: string;
+    readonly continuationToken?: string;
   },
   deps: {
     readonly from: ChannelFrom<SlackChannelState>;
@@ -993,7 +1042,7 @@ async function receiveOnSlack(
 
   // Threadless proactive runs need distinct identities until their first
   // Slack post supplies the real thread timestamp and aliases the session.
-  const continuationThreadTs = threadTs || crypto.randomUUID();
+  const continuationThreadTs = threadTs || input.continuationToken || crypto.randomUUID();
   const audience =
     receiveTarget.audience === undefined
       ? undefined

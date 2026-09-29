@@ -21,6 +21,7 @@ import type {
   TurnPolicy,
 } from "#channel/types.js";
 import { DEFAULT_TURN_POLICY } from "#channel/types.js";
+import { OccurrenceAdmissionPendingError } from "#shared/occurrence-admission-errors.js";
 import { isReservedSessionCommandToken } from "#execution/session-inbox/address.js";
 
 interface BaseChannelAddressDeliveryOptions {
@@ -69,6 +70,9 @@ export function createChannelAddress<TState = undefined>(input: {
   readonly metadata?: ChannelDeliverySource;
   readonly runtime: Runtime;
   readonly turnPolicy?: TurnPolicy;
+  readonly requestInput?: boolean;
+  /** Recover an active occurrence without redelivering its request. */
+  readonly occurrenceToken?: string;
 }): ChannelAddress<TState> {
   const metadata: Partial<ChannelDeliverySource> = input.metadata ?? {};
   const namespacedToken = `${input.channelName}:${input.continuationToken}`;
@@ -101,7 +105,17 @@ export function createChannelAddress<TState = undefined>(input: {
       };
       const command: Extract<SessionCommand, { readonly kind: "send" }> =
         caller === undefined ? commandWithoutCaller : { ...commandWithoutCaller, caller };
+      const occurrenceToken = input.occurrenceToken;
+      const continuationToken = namespacedToken;
       const dispatch = async (): Promise<Session | undefined> => {
+        if (occurrenceToken !== undefined) {
+          const owner = await input.runtime.resolveContinuation(occurrenceToken);
+          if (owner === undefined) return undefined;
+          return createSession(owner.sessionId, input.runtime, {
+            ...metadata,
+            turnPolicy: input.turnPolicy,
+          });
+        }
         const result = await input.runtime.dispatchContinuation({
           command,
           continuationToken: namespacedToken,
@@ -130,14 +144,14 @@ export function createChannelAddress<TState = undefined>(input: {
               ...input.adapter,
               state: { ...input.adapter.state, ...(state as Record<string, unknown>) },
             };
-      const runInput: RunInput = {
+      const runInput: Omit<RunInput, "occurrenceToken"> & { occurrenceToken?: string } = {
         adapter,
         auth: options.auth,
-        capabilities: { requestInput: true },
+        capabilities: { requestInput: input.requestInput ?? true },
         callback: options.callback,
         channelName: input.channelName,
-        continuationConflictCommand: command,
-        continuationToken: namespacedToken,
+        continuationConflictCommand: occurrenceToken === undefined ? command : undefined,
+        continuationToken,
         delivery,
         initiatorAuth: options.initiatorAuth,
         input: {
@@ -149,8 +163,13 @@ export function createChannelAddress<TState = undefined>(input: {
         requestId: metadata.requestId,
         title: options.title,
       };
+      if (occurrenceToken !== undefined) runInput.occurrenceToken = occurrenceToken;
       const handle = await input.runtime.createSession(runInput);
-      return createSession(handle.sessionId, input.runtime, {
+      const sessionId =
+        occurrenceToken === undefined
+          ? handle.sessionId
+          : await resolveCreateOnceOwner(input.runtime, occurrenceToken);
+      return createSession(sessionId, input.runtime, {
         ...metadata,
         turnPolicy: input.turnPolicy,
       });
@@ -200,6 +219,43 @@ export function createChannelAddress<TState = undefined>(input: {
   };
 }
 
+const CREATE_ONCE_OWNER_TIMEOUT_MS = 5_000;
+const CREATE_ONCE_OWNER_POLL_MS = 20;
+
+/** Thrown when a create-once claim has not settled; callers should retry the delivery. */
+export class CreateOnceClaimPendingError extends Error {
+  readonly continuationToken: string;
+  constructor(continuationToken: string) {
+    super(`Create-once claim "${continuationToken}" did not settle; retry the delivery.`);
+    this.name = "CreateOnceClaimPendingError";
+    this.continuationToken = continuationToken;
+  }
+}
+
+/**
+ * Continuation claims settle inside workflow startup, so a redelivered
+ * occurrence may start a workflow that loses the claim. Only a resolved
+ * claim identifies the admitted session; an unsettled claim is never
+ * reported as admitted.
+ */
+export async function resolveCreateOnceOwner(
+  runtime: Runtime,
+  continuationToken: string,
+  options: { readonly timeoutMs?: number } = {},
+): Promise<string> {
+  const deadline = Date.now() + (options.timeoutMs ?? CREATE_ONCE_OWNER_TIMEOUT_MS);
+  while (true) {
+    try {
+      const owner = await runtime.resolveContinuation(continuationToken);
+      if (owner !== undefined) return owner.sessionId;
+    } catch (error) {
+      if (!(error instanceof OccurrenceAdmissionPendingError)) throw error;
+    }
+    if (Date.now() >= deadline) throw new CreateOnceClaimPendingError(continuationToken);
+    await new Promise<void>((resolve) => setTimeout(resolve, CREATE_ONCE_OWNER_POLL_MS));
+  }
+}
+
 /** Builds a request-scoped factory for channel addresses on one authored channel. */
 export function createChannelAddressFn<TState = undefined>(input: {
   readonly adapter: ChannelAdapter<any>;
@@ -207,6 +263,8 @@ export function createChannelAddressFn<TState = undefined>(input: {
   readonly metadata?: ChannelDeliverySource;
   readonly runtime: Runtime;
   readonly turnPolicy?: TurnPolicy;
+  readonly requestInput?: boolean;
+  readonly occurrenceToken?: string;
 }): ChannelAddressFn<TState> {
   return (continuationToken) => createChannelAddress({ ...input, continuationToken });
 }

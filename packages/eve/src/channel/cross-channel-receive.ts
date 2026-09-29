@@ -103,6 +103,8 @@ export function createCrossChannelToFn(
 interface InvokeChannelReceiveInput {
   readonly runtime: Runtime;
   readonly target: Pick<CrossChannelTarget, "name" | "receive" | "adapter" | "turnPolicy">;
+  readonly requestInput?: boolean;
+  readonly occurrenceToken?: string;
   readonly input: {
     readonly message: string | UserContent;
     readonly target: Readonly<Record<string, unknown>>;
@@ -116,7 +118,7 @@ interface InvokeChannelReceiveInput {
 /**
  * Shared authored `receive(input, ctx)` invocation used by route and schedule delivery.
  */
-async function invokeChannelReceive(args: InvokeChannelReceiveInput): Promise<Session> {
+export async function invokeChannelReceive(args: InvokeChannelReceiveInput): Promise<Session> {
   if (!args.target.receive) {
     throw new Error(args.describeMissingReceive());
   }
@@ -125,6 +127,8 @@ async function invokeChannelReceive(args: InvokeChannelReceiveInput): Promise<Se
   }
   const channelOperations = createChannelOperations({
     adapter: args.target.adapter,
+    requestInput: args.requestInput,
+    occurrenceToken: args.occurrenceToken,
     channelName: args.target.name,
     runtime: args.runtime,
     turnPolicy: args.turnPolicy ?? args.target.turnPolicy,
