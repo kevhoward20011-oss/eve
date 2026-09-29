@@ -4,6 +4,7 @@ import { contextStorage } from "#context/container.js";
 import { AuthKey, ScheduleIdKey } from "#context/keys.js";
 import { defineDynamic } from "#dynamic/definition.js";
 import { markDynamicCallbackRebind } from "#internal/dynamic-tool-rebind.js";
+import { scheduleCollectionToolPrefix } from "#shared/schedule-collection-tools.js";
 import { parseJsonObject } from "#shared/json.js";
 import { always } from "#tools/approval/policies.js";
 import type { Approval } from "#public/definitions/approval.js";
@@ -91,7 +92,6 @@ export function createScheduleCollectionToolDynamicDefinition<TRequest, TMetadat
             contextStorage.getStore()?.get(ScheduleIdKey) !== undefined
           )
             return null;
-          const prefix = `schedule__${identity.collection}__`;
           const requestSchema =
             definition.request ??
             z
@@ -157,6 +157,7 @@ export function createScheduleCollectionToolDynamicDefinition<TRequest, TMetadat
             if (approval !== undefined) entry.approval = approval;
             return defineTool(entry) as DynamicToolEntry;
           };
+          const prefix = `${scheduleCollectionToolPrefix(identity.collection)}__`;
           const operations: Record<string, DynamicToolEntry> = {
             [`${prefix}create`]: define(
               `Create a future agent invocation, not an immediate action. ${timingGuidance} Request content is not available from get/list and cannot be edited later. Deliveries are fixed at creation and cannot be changed; to change them, delete the schedule and create it again. Each delivery receives content the run writes for it.`,
