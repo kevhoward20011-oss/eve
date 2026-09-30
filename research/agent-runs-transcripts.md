@@ -36,13 +36,6 @@ Gateway does not capture it. Content flags remain so Agent Runs can fetch only
 directions eve recorded. Other destinations retain their existing content,
 subject to their own export policies.
 
-## Vercel ingestion boundary
-
-Vercel ingestion, not eve, will move span content into Transcripts for teams with
-Transcripts enabled. Once the drop rollout is enabled, teams with Transcripts
-disabled will no longer retain content in Vercel trace storage. Customer drains
-continue receiving full content permitted by eve's trace and export policies.
-
 Agent Runs must never fetch a Gateway content direction unless that span's
 exported `agent.trace.content.input` or `.output` is `true`. Gateway capture is
 not permission to bypass eve's policy. Session title visibility remains keyed
