@@ -13,9 +13,6 @@ import {
   toolName,
   SPAN_NAMES,
   CONTENT_FIELDS,
-  terminalAttributes,
-  actionErrorAttributes,
-  memoryCountAttributes,
   applyAttributes,
   type ChannelMetadata,
   type PrincipalMetadata,
@@ -39,6 +36,11 @@ import type {
 } from "#tracing/core/types.js";
 import type { ActionKind } from "#tracing/core/types.js";
 import { gatewayCostAttributes } from "#tracing/core/gateway.js";
+import type { ScopeCost } from "#tracing/core/scope-lifecycle.js";
+import {
+  completeScope,
+  capturedScopeData as capturedData,
+} from "#tracing/core/scope-completion.js";
 
 export interface ScopeIdentity extends RunIdentity {
   readonly agentName?: string;
@@ -168,29 +170,8 @@ export interface ScopePersistence {
   remove(key: string): Promise<void>;
 }
 
-export interface RuntimeBinding {
-  readonly key: string;
-  readonly reference?: TraceReference;
-  readonly startTimeMs?: number;
-  readonly links?: readonly TraceLink[];
-  readonly deferred?: boolean;
-  readonly parent?: TraceReference;
-  readonly content?: { readonly recordInputs: boolean; readonly recordOutputs: boolean };
-}
-
-export interface ScopeTerminal {
-  readonly outcome?: string;
-  readonly failed?: boolean;
-  readonly error?: unknown;
-  readonly errorCode?: string;
-  readonly output?: unknown;
-  readonly response?: unknown;
-  readonly usage?: Usage;
-  readonly model?: ModelResult;
-  readonly recordCount?: number;
-  readonly records?: readonly { id?: string; content: string }[];
-  readonly endTimeMs?: number;
-}
+export type { RuntimeBinding, ScopeTerminal } from "#tracing/core/scope-lifecycle.js";
+import type { RuntimeBinding, ScopeTerminal } from "#tracing/core/scope-lifecycle.js";
 
 export interface RuntimeScope {
   readonly type: ScopeData["type"];
@@ -211,13 +192,7 @@ export interface RuntimeScope {
   nextStep(): number;
   modelSelected(modelId: string, provider: string): void;
   error(error?: unknown, errorType?: string): void;
-  cost(cost: {
-    cost?: number;
-    gatewayCost?: number;
-    inputCost?: number;
-    outputCost?: number;
-    generationId?: string;
-  }): void;
+  cost(cost: ScopeCost): void;
 }
 
 const authoringRuntimes = new WeakMap<object, RuntimeScope>();
@@ -462,7 +437,14 @@ export function createScopeRuntime(input: {
           actualData.type === "activation" && result.usage === undefined
             ? { ...result, usage: { inputTokens: totalInput, outputTokens: totalOutput } }
             : result;
-        complete(operation, actualData, terminal, actualCapture, startTimeMs);
+        completeScope(
+          operation,
+          actualData,
+          terminal,
+          actualCapture,
+          startTimeMs,
+          input.serializer,
+        );
         if (pendingError !== undefined) operation.fail(pendingError.error, pendingError.errorType);
         if (actualData.type === "model" && result.model !== undefined)
           await parent?.usage(result.model.usage);
@@ -678,57 +660,6 @@ export function createScopeRuntime(input: {
     };
   }
 
-  function complete(
-    operation: TraceOperation,
-    data: ScopeData,
-    result: ScopeTerminal,
-    capture: CaptureDecision,
-    startTimeMs: number,
-  ): void {
-    const outcome = result.outcome ?? (result.failed ? "failed" : "completed");
-    applyAttributes(operation, terminalAttributes(data.type, outcome));
-    if (result.usage !== undefined)
-      applyAttributes(
-        operation,
-        usageAttributes(result.usage, data.type === "activation" || data.type === "model"),
-      );
-    if (data.type === "activation") {
-      operation.addEvent("turn.started", undefined, startTimeMs);
-      operation.addEvent(`turn.${outcome}`, undefined, result.endTimeMs);
-    }
-    if (data.type === "step")
-      operation.addEvent(
-        result.failed ? "step.failed" : "step.completed",
-        undefined,
-        result.endTimeMs,
-      );
-    if (data.type === "model" && result.model !== undefined)
-      applyAttributes(
-        operation,
-        modelResultAttributes(result.model, input.serializer, capture.recordOutputs),
-      );
-    if (data.type === "action" && result.errorCode !== undefined)
-      applyAttributes(operation, actionErrorAttributes(result.errorCode));
-    if (data.type === "memory" && result.recordCount !== undefined)
-      applyAttributes(operation, memoryCountAttributes(result.recordCount));
-    const outputs: Record<string, Attributes[string]> = {};
-    if (capture.recordOutputs) {
-      if (
-        (data.type === "action" &&
-          data.options.kind !== "subagent-call" &&
-          data.options.kind !== "remote-agent-call") ||
-        data.type === "tool"
-      )
-        outputs[CONTENT_FIELDS.toolResult] = input.serializer.json(result.output);
-      if (data.type === "approval")
-        outputs[CONTENT_FIELDS.approvalResponse] = input.serializer.json(result.response);
-    }
-    if (capture.recordInputs && data.type === "memory")
-      outputs[CONTENT_FIELDS.memoryRecords] = input.serializer.json(result.records);
-    applyAttributes(operation, outputs);
-    if (result.failed) operation.fail(result.error, result.errorCode);
-  }
-
   return {
     turn(
       identity: ScopeIdentity,
@@ -766,42 +697,4 @@ export function createScopeRuntime(input: {
       });
     },
   };
-}
-
-function capturedData(data: ScopeData, capture: CaptureDecision): ScopeData {
-  if (capture.recordInputs) return data;
-  switch (data.type) {
-    case "activation":
-      return {
-        ...data,
-        options: {
-          ...data.options,
-          title: undefined,
-          currentPrincipal:
-            data.options.currentPrincipal === undefined
-              ? undefined
-              : { type: data.options.currentPrincipal.type },
-          initiatorPrincipal:
-            data.options.initiatorPrincipal === undefined
-              ? undefined
-              : { type: data.options.initiatorPrincipal.type },
-          delivery:
-            data.options.delivery === undefined
-              ? undefined
-              : { ...data.options.delivery, input: undefined },
-        },
-      };
-    case "model":
-      return {
-        ...data,
-        options: { ...data.options, messages: undefined, instructions: undefined },
-      };
-    case "action":
-    case "tool":
-      return { ...data, options: { ...data.options, arguments: undefined } };
-    case "approval":
-      return { ...data, options: { ...data.options, request: undefined } };
-    default:
-      return data;
-  }
 }
