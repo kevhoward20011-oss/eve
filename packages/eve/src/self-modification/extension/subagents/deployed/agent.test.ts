@@ -8,10 +8,9 @@ vi.mock("../../extension.js", () => ({
     config: {
       deployed: {
         authorize,
-        repository: "acme/agents",
         directory: ".",
         baseBranch: "main",
-        github: { connector: "github/agent-author" },
+        github: { connector: "github/agent-author", repository: "acme/agents" },
       },
     },
   },

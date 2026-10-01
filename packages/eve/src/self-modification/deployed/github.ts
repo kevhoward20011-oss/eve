@@ -23,6 +23,6 @@ export function deployedGitHubConfig(config: ResolvedDeployedSelfModificationCon
   return {
     broker: brokerGitHubLease,
     connector: config.github.connector,
-    org: config.repository.slice(0, config.repository.indexOf("/")),
+    org: config.github.repository.slice(0, config.github.repository.indexOf("/")),
   };
 }

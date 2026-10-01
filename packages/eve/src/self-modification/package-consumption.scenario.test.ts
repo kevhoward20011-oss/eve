@@ -197,10 +197,7 @@ if (subagent === undefined || !subagent.agent.tools.some((tool) => tool.name ===
 export default selfModification({
   deployed: {
     authorize: () => true,
-    repository: "acme/agents",
-    directory: ".",
-    baseBranch: "main",
-    github: { connector: "github/agent-author" },
+    github: { repository: "acme/agents", connector: "github/agent-author" },
   },
 });
 `,

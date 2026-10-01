@@ -91,7 +91,7 @@ export async function initializeDeployedCheckout(
   config: ResolvedDeployedSelfModificationConfig,
   sessionId: string,
 ): Promise<void> {
-  const repository = config.repository;
+  const repository = config.github.repository;
   const checkout = sandbox.resolvePath("repository");
   const result = await executeGitHubShell(
     {

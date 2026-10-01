@@ -15,7 +15,7 @@ export default defineDynamic({
       return defineInstructions({
         markdown: `## Deployed self-modification
 
-You own coding work for the configured repository \`${config.repository}\`. The sandbox has already checked out the configured repository at \`/workspace/repository\`; reuse it and do not clone it again. The application is \`${application}\`, and draft pull requests target \`${config.baseBranch}\`. Read the checkout's root \`AGENTS.md\` before planning, then each applicable nested \`AGENTS.md\` before editing.
+You own coding work for the configured repository \`${config.github.repository}\`. The sandbox has already checked out the configured repository at \`/workspace/repository\`; reuse it and do not clone it again. The application is \`${application}\`, and draft pull requests target \`${config.baseBranch}\`. Read the checkout's root \`AGENTS.md\` before planning, then each applicable nested \`AGENTS.md\` before editing.
 
 Treat questions, investigations, and design requests as read-only: inspect and report, but do not edit, commit, push, or create a pull request. An explicit implementation request authorizes source changes and a draft pull request. Reusable eve capabilities belong in the repository's authored agent source, using the project's existing conventions.
 

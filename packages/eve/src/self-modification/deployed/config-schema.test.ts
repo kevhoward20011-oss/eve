@@ -13,31 +13,40 @@ describe("deployed self-modification configuration", () => {
     authorize: () => true,
     baseBranch: "release/production",
     directory: "apps/weather",
-    github: { connector: "github/agent-author" },
-    repository: "acme/agents",
+    github: { connector: "github/agent-author", repository: "acme/agents" },
   };
+  const repository = (value: string) => ({
+    ...deployed,
+    github: { ...deployed.github, repository: value },
+  });
 
   it.each([deployed, { ...deployed, directory: "." }])("accepts %j", (config) => {
     expect(validate(config).issues).toBeUndefined();
   });
 
   it("defaults the directory to the repository root and the base branch to main", () => {
-    const { authorize, github, repository } = deployed;
-    const result = validate({ authorize, github, repository });
+    const { authorize, github } = deployed;
+    const result = validate({ authorize, github });
     expect(result.issues).toBeUndefined();
     expect(result).toMatchObject({
-      value: { deployed: { baseBranch: "main", directory: ".", repository } },
+      value: { deployed: { baseBranch: "main", directory: ".", github } },
     });
   });
 
   it.each([
-    ["repository", { ...deployed, repository: "github.com/acme/agents" }, "owner/repo"],
-    ["repository owner", { ...deployed, repository: "-acme/agents" }, "owner/repo"],
-    ["owner characters", { ...deployed, repository: "acme_corp/agents" }, "owner/repo"],
+    ["repository", repository("github.com/acme/agents"), "owner/repo"],
+    ["repository owner", repository("-acme/agents"), "owner/repo"],
+    ["owner characters", repository("acme_corp/agents"), "owner/repo"],
+    ["top-level repository", { ...deployed, repository: "acme/agents" }, "Unrecognized key"],
     ["directory", { ...deployed, directory: "../agents" }, "safe repository-relative"],
     ["base branch", { ...deployed, baseBranch: "refs/heads/main" }, "not a full Git ref"],
     ["lock ref", { ...deployed, baseBranch: "main.lock" }, "valid branch name"],
-    ["connector", { ...deployed, github: { connector: "" } }, "connector"],
+    ["connector", { ...deployed, github: { ...deployed.github, connector: "" } }, "connector"],
+    [
+      "missing repository",
+      { ...deployed, github: { connector: "github/agent-author" } },
+      "github.repository",
+    ],
     ["authorization", { ...deployed, authorize: true }, "authorize must be a function"],
     [
       "missing authorization",

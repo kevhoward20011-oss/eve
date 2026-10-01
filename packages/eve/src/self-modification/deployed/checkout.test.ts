@@ -13,8 +13,7 @@ const deployed = {
   authorize: () => true,
   baseBranch: "main",
   directory: "apps/weather",
-  github: { connector: "github/agent-author" },
-  repository: "acme/agents",
+  github: { connector: "github/agent-author", repository: "acme/agents" },
 };
 
 import type { SandboxSession } from "#shared/sandbox-session.js";

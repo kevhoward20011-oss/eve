@@ -94,10 +94,9 @@ export default selfModification({
   // reasoning: "high",
   deployed: {
     authorize: ({ principal }) => principal?.principalId === "trusted-editor",
-    repository: "acme/agents",
+    github: { repository: "acme/agents", connector: "github/agent-author" },
     directory: "apps/support",
     baseBranch: "main",
-    github: { connector: "github/agent-author" },
   },
 });
 ```
@@ -110,10 +109,13 @@ resolver returns `null` outside its mode, so the root agent sees at most one:
 namespace collision with the bundled development extension, and the TUI and setup
 keep their fixed mount path.
 
-Require an authorization callback, repository, and connector; `directory`
-defaults to `"."` and `baseBranch` to `"main"`. Validate GitHub identifiers and safe relative paths.
-Configure the connector's installation for only this repository; the
-`repository` field does not constrain eve-code's `gh` credential requests.
+Require an authorization callback and `github: { repository, connector }`;
+`directory` defaults to `"."` and `baseBranch` to `"main"`. Forge-specific identity
+and credentials live under the provider key, so another git forge would be a sibling
+key; `directory` and `baseBranch` are git-general. Validate GitHub identifiers and
+safe relative paths. Configure the connector's installation for only this
+repository; `github.repository` does not constrain eve-code's `gh` credential
+requests.
 
 For the initial product, use Connect-backed GitHub authentication. Delete the old
 deployed PAT exception and checkout/publish credential-provider configuration.

@@ -17,14 +17,16 @@ export type DeployedSelfModificationAuthorization = (
 export interface DeployedSelfModificationConfig {
   /** Policy controlling who can delegate to the coding child; errors deny delegation. */
   readonly authorize: DeployedSelfModificationAuthorization;
-  /** GitHub repository in owner/repository form. */
-  readonly repository: string;
   /** Application directory relative to the repository root. Defaults to `"."`. */
   readonly directory?: string;
   /** Branch against which changes are proposed. Defaults to `"main"`. */
   readonly baseBranch?: string;
-  /** Connect-backed GitHub connector. */
-  readonly github: { readonly connector: string };
+  /** GitHub repository and the Vercel Connect connector that authenticates to it. */
+  readonly github: {
+    /** Repository in owner/repository form. */
+    readonly repository: string;
+    readonly connector: string;
+  };
 }
 
 /** Deployed configuration with defaults applied. */
@@ -75,12 +77,6 @@ export const deployedSelfModificationConfigSchema = z
       (value) => typeof value === "function",
       "Deployed self-modification authorize must be a function.",
     ),
-    repository: z
-      .string()
-      .refine(
-        isGitHubRepository,
-        "Deployed self-modification repository must use owner/repo form.",
-      ),
     directory: z
       .string()
       .refine(
@@ -95,6 +91,16 @@ export const deployedSelfModificationConfigSchema = z
         "Deployed self-modification baseBranch must be a valid branch name, not a full Git ref.",
       )
       .default("main"),
-    github: z.object({ connector: z.string().min(1) }).strict(),
+    github: z
+      .object({
+        repository: z
+          .string()
+          .refine(
+            isGitHubRepository,
+            "Deployed self-modification github.repository must use owner/repo form.",
+          ),
+        connector: z.string().min(1),
+      })
+      .strict(),
   })
   .strict();

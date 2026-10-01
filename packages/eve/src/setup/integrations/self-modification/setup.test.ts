@@ -188,7 +188,7 @@ describe("self-modification integration setup", () => {
 
     expect(ctx.resolveVercelProject).toHaveBeenCalledWith("self-modification");
     expect(effects.writeConfig).toHaveBeenCalledWith(
-      expect.stringContaining('github: { connector: "github/selfmod-acme-agents" }'),
+      expect.stringContaining('connector: "github/selfmod-acme-agents"'),
     );
   });
 

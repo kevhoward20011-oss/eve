@@ -68,10 +68,12 @@ export function renderDeployedSelfModificationBlock(values: SelfModificationSetu
   // Allows every caller to delegate source changes. Replace with a custom policy
   // that checks the caller's principal and channel (recommended).
   authorize: () => true,
-  repository: ${JSON.stringify(values.repository)},
+  github: {
+    repository: ${JSON.stringify(values.repository)},
+    connector: ${JSON.stringify(values.connector)},
+  },
   directory: ${JSON.stringify(values.directory)},
   baseBranch: ${JSON.stringify(values.baseBranch)},
-  github: { connector: ${JSON.stringify(values.connector)} },
 },
 `;
 }
