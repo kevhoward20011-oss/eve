@@ -2,7 +2,6 @@ import {
   ROOT_CONTEXT,
   type Context,
   type SpanContext,
-  type Tracer,
   trace,
 } from "#compiled/@opentelemetry/api/index.js";
 
@@ -20,7 +19,8 @@ import type { AgentActionTraceState, AgentTraceStateStore } from "#tracing/agent
 import { normalizeChannelAudience } from "#shared/channel-audience.js";
 import { isSampledTrace } from "#tracing/sampled-trace.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
-import { bindEveTraceScope, type EveTraceScope } from "#tracing/adapters/eve/scopes.js";
+import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
+import type { RuntimeScope, createTraceLifecycle } from "#tracing/core/scopes.js";
 
 interface AgentActionInstrumentation {
   readonly events: Pick<
@@ -43,6 +43,7 @@ export interface AgentActionContext {
 
 /** Builds durable `agent.action` spans around eve's runtime dispatch boundary. */
 export function createAgentActionInstrumentation(input: {
+  readonly lifecycle: ReturnType<typeof createTraceLifecycle>;
   readonly frameworkVersion: string;
   readonly idGenerator: AgentSpanIdGenerator;
   readonly recordInputs: boolean;
@@ -51,7 +52,6 @@ export function createAgentActionInstrumentation(input: {
     event: InstrumentationActionStartedEvent,
   ) => SpanContext | undefined | PromiseLike<SpanContext | undefined>;
   readonly stateStore: AgentTraceStateStore;
-  readonly tracer: Tracer;
 }): AgentActionInstrumentation {
   const byAttempt = new Map<string, Set<string>>();
 
@@ -100,34 +100,29 @@ export function createAgentActionInstrumentation(input: {
     }
   };
 
-  const startScope = (state: AgentActionTraceState): Promise<EveTraceScope> =>
-    bindEveTraceScope({
-      tracer: input.tracer,
-      idGenerator: input.idGenerator,
-      key: `${state.sessionId}:${state.callId}`,
-      identity: {
-        sessionId: state.sessionId,
-        rootSessionId: state.rootSessionId,
-        traceSessionId: state.traceSessionId,
-        turnId: state.turnId,
-        frameworkVersion: input.frameworkVersion,
-      },
-      parent: contextFromActionState(state),
-      reference: { ...state.parent, spanId: state.spanId },
-      startTimeMs: state.startTimeMs,
-      deferred: true,
-      attempt: { index: state.stepIndex, attempt: state.attemptIndex },
-      data: {
-        type: "action",
-        options: {
-          callId: state.callId,
-          kind: state.kind,
-          name: state.name,
-          arguments:
-            state.inputAttribute === undefined ? undefined : JSON.parse(state.inputAttribute),
+  const startScope = (state: AgentActionTraceState): Promise<RuntimeScope> =>
+    input.lifecycle.resolve(
+      eveScopeRecord(
+        {
+          ...state,
+          frameworkVersion: input.frameworkVersion,
+          reference: { ...state.parent, spanId: state.spanId },
+          startTimeMs: state.startTimeMs,
         },
-      },
-    });
+        `${state.sessionId}:${state.callId}`,
+        {
+          type: "action",
+          options: {
+            callId: state.callId,
+            kind: state.kind,
+            name: state.name,
+            arguments:
+              state.inputAttribute === undefined ? undefined : JSON.parse(state.inputAttribute),
+          },
+        },
+      ),
+      { deferred: true, executionContext: contextFromActionState(state) },
+    );
 
   return {
     async contextFor(sessionId, turnId, callId) {

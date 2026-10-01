@@ -2,7 +2,6 @@ import {
   context as otelContext,
   createContextKey,
   propagation,
-  SpanKind,
   trace,
   type Attributes,
   type Context,
@@ -21,10 +20,9 @@ import {
 import { truncateTelemetryText } from "#tracing/telemetry-budget.js";
 import { replaceBaggageMember } from "#protocol/baggage.js";
 import { isObject } from "#shared/guards.js";
-import { startEveSpan } from "#tracing/adapters/eve/span.js";
+import { eveTransportLifecycle } from "#tracing/adapters/eve/transports.js";
 import {
   mcpAttributes,
-  mcpName,
   mcpSessionAttributes,
   rpcStatusAttributes,
   CONTENT_FIELDS,
@@ -130,16 +128,14 @@ export async function withMcpToolsListSpan<T>(input: {
     method: "tools/list",
     protocolVersion: input.protocolVersion,
   });
-  const span = startEveSpan({
-    tracer: trace.getTracer("eve.mcp"),
-    type: "mcp",
-    operationId: `${input.connectionName}:tools/list`,
-    name: mcpName("tools/list"),
-    options: {
-      attributes,
-      kind: SpanKind.CLIENT,
-    },
-    parent,
+  const span = eveTransportLifecycle("eve.mcp").mcp({
+    method: "tools/list",
+    connectionName: input.connectionName,
+    protocolVersion: input.protocolVersion,
+    attributes,
+    parent: trace.getSpan(parent)?.spanContext(),
+    executionContext: parent,
+    capture: { emit: true, ...agentToolContentPolicy(parent) },
   });
   const spanContext = withMcpMethodName(
     withAgentToolSpanContext(trace.setSpan(parent, trace.wrapSpanContext(span.reference)), {
@@ -182,16 +178,15 @@ export async function withMcpToolCallSpan<T>(input: {
     return await runMcpToolCall(input, parent, undefined, policy);
   }
 
-  const span = startEveSpan({
-    tracer: trace.getTracer("eve.mcp"),
-    type: "mcp",
-    operationId: `${input.connectionName}:tools/call:${input.toolName}`,
-    name: mcpName("tools/call", truncateTelemetryText(input.toolName, 128)),
-    options: {
-      attributes: mcpToolCallAttributes(input),
-      kind: SpanKind.CLIENT,
-    },
-    parent,
+  const span = eveTransportLifecycle("eve.mcp").mcp({
+    method: "tools/call",
+    connectionName: input.connectionName,
+    toolName: truncateTelemetryText(input.toolName, 128),
+    protocolVersion: input.protocolVersion,
+    attributes: mcpToolCallAttributes(input),
+    parent: trace.getSpan(parent)?.spanContext(),
+    executionContext: parent,
+    capture: { emit: true, ...policy },
   });
   const spanContext = withMcpMethodName(
     withAgentToolSpanContext(trace.setSpan(parent, trace.wrapSpanContext(span.reference)), {

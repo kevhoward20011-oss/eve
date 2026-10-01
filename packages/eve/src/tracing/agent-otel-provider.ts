@@ -18,7 +18,6 @@ import { createAgentApprovalInstrumentation } from "#tracing/agent-approval-inst
 import { createAgentChannelDeliveryInstrumentation } from "#tracing/agent-channel-delivery-instrumentation.js";
 import { createAgentToolInstrumentation } from "#tracing/agent-tool-instrumentation.js";
 import { markAgentTraceContext } from "#tracing/agent-trace-context.js";
-import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import * as runtimeAttributes from "#tracing/agent-otel-runtime-context.js";
 import { createAgentMemoryInstrumentation } from "#tracing/agent-memory-instrumentation.js";
 import { readGatewayCost, readGatewayCostData } from "#tracing/agent-otel-usage.js";
@@ -56,9 +55,11 @@ import { withAgentToolContentPolicy } from "#tracing/agent-tool-span-context.js"
 import { resolveInstrumentationEnvironment } from "#internal/application/dev-environment.js";
 import type { ConversationEnvironment } from "#shared/conversation-context.js";
 import type { TraceLink } from "#tracing/core/types.js";
-import { bindEveTraceScope, type EveTraceScope } from "#tracing/adapters/eve/scopes.js";
+import { createEveTraceLifecycle } from "#tracing/adapters/eve/scopes.js";
+import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
+import type { RuntimeScope } from "#tracing/core/scopes.js";
 
-type SpanState = EveTraceScope & { readonly context: Context };
+type SpanState = { readonly runtime: RuntimeScope; readonly context: Context };
 
 export interface AgentOtelInstrumentationInput {
   readonly environment?: ConversationEnvironment;
@@ -93,12 +94,14 @@ export function createAgentOtelInstrumentation(
   const environment = input.environment ?? resolveInstrumentationEnvironment();
   const recordInputs = input.recordInputs ?? false;
   const recordOutputs = input.recordOutputs ?? false;
+  const lifecycle = createEveTraceLifecycle(input);
   const executionContexts = new WeakMap<InstrumentationAttemptScope, Map<string, Context>>();
   const attemptScopes = new Map<string, InstrumentationAttemptScope>();
   // A lost serverless worker retries the whole turn step from entry.
   const steps = new WeakMap<InstrumentationAttemptScope, SpanState>();
   const modelSpans = new WeakMap<InstrumentationAttemptScope, Map<string, SpanState>>();
   const actions = createAgentActionInstrumentation({
+    lifecycle,
     frameworkVersion: input.frameworkVersion,
     idGenerator: input.idGenerator,
     recordInputs,
@@ -108,15 +111,15 @@ export function createAgentOtelInstrumentation(
       return turn?.context;
     },
     stateStore: input.stateStore,
-    tracer: input.tracer,
   });
   const approvals = createAgentApprovalInstrumentation({
+    lifecycle,
     actionContextFor: actions.contextFor,
     frameworkVersion: input.frameworkVersion,
     idGenerator: input.idGenerator,
-    tracer: input.tracer,
   });
   const tools = createAgentToolInstrumentation({
+    lifecycle,
     actionContextFor: actions.contextFor,
     idGenerator: input.idGenerator,
     recordInputs,
@@ -128,9 +131,8 @@ export function createAgentOtelInstrumentation(
         ? undefined
         : { context: step.context, spanContext: step.runtime.reference };
     },
-    tracer: input.tracer,
   });
-  const memory = createAgentMemoryInstrumentation({ ...input, environment });
+  const memory = createAgentMemoryInstrumentation({ ...input, environment, lifecycle });
   const { prepareSessionTrace, prepareTurnTrace } = createAgentOtelSessionContext({
     ...input,
     environment,
@@ -205,43 +207,40 @@ export function createAgentOtelInstrumentation(
       event.scope.channelAudience,
     );
     const activeSpanContext = trace.getSpan(context.active())?.spanContext();
-    const bound = await bindEveTraceScope({
-      tracer: input.tracer,
-      idGenerator: input.idGenerator,
-      key: event.idempotencyKey,
-      parent: turnContext,
-      reference: {
-        ...turn.context,
-        spanId: input.idGenerator.deriveSpanId(attemptIdempotencyKey(event.scope)),
-      },
-      identity: {
-        sessionId: event.scope.sessionId,
-        rootSessionId: event.scope.rootSessionId ?? event.scope.sessionId,
-        traceSessionId: traceSessionIdOf(event.scope),
-        turnId: event.scope.turnId,
-        agentName: event.scope.functionId,
-        frameworkVersion: input.frameworkVersion,
-      },
-      data: {
-        type: "step",
-        options: {
-          index: event.scope.stepIndex,
-          attempt: event.scope.attemptIndex,
-          runtimeContext: event.runtimeContext,
-          channel: runtimeAttributes.agentActivationMetadata({
-            session,
-            turn,
-            sessionId: event.scope.sessionId,
-          }).channel,
+    const runtime = await lifecycle.resolve(
+      eveScopeRecord(
+        {
+          ...event.scope,
+          frameworkVersion: input.frameworkVersion,
+          parent: turn.context,
+          reference: {
+            ...turn.context,
+            spanId: input.idGenerator.deriveSpanId(attemptIdempotencyKey(event.scope)),
+          },
+          links:
+            activeSpanContext === undefined || activeSpanContext.traceId === turn.context.traceId
+              ? undefined
+              : [{ relationship: "execution.delivery", context: activeSpanContext }],
         },
-      },
-      links:
-        activeSpanContext === undefined || activeSpanContext.traceId === turn.context.traceId
-          ? undefined
-          : [{ relationship: "execution.delivery", context: activeSpanContext }],
-    });
-    const stepContext = trace.setSpan(turnContext, trace.wrapSpanContext(bound.runtime.reference));
-    steps.set(event.scope, { ...bound, context: stepContext });
+        event.idempotencyKey,
+        {
+          type: "step",
+          options: {
+            index: event.scope.stepIndex,
+            attempt: event.scope.attemptIndex,
+            runtimeContext: event.runtimeContext,
+            channel: runtimeAttributes.agentActivationMetadata({
+              session,
+              turn,
+              sessionId: event.scope.sessionId,
+            }).channel,
+          },
+        },
+      ),
+      { executionContext: turnContext },
+    );
+    const stepContext = trace.setSpan(turnContext, trace.wrapSpanContext(runtime.reference));
+    steps.set(event.scope, { runtime, context: stepContext });
     attemptScopes.set(event.scope.attemptId, event.scope);
   };
 
@@ -259,7 +258,7 @@ export function createAgentOtelInstrumentation(
     attemptScopes.delete(event.scope.attemptId);
     const attempt = steps.get(scope);
     if (attempt === undefined) return;
-    await attempt.finish({
+    await attempt.runtime.finish({
       failed: event.type === "step.attempt.failed",
       error: event.type === "step.attempt.failed" ? event.error : undefined,
     });
@@ -292,38 +291,37 @@ export function createAgentOtelInstrumentation(
         if (isSampledTrace(turn.context)) {
           const agentName = session?.agentName ?? turn.subagentName;
           const parentContext = withChannelAudience(ROOT_CONTEXT, session?.channelAudience);
-          const bound = await bindEveTraceScope({
-            tracer: input.tracer,
-            idGenerator: input.idGenerator,
-            key: `${event.sessionId}:${event.turnId}`,
-            reference: turn.context,
-            startTimeMs: turn.startTimeMs,
-            deferred: true,
-            parent: parentContext,
-            links: agentActivationLinks(turn),
-            identity: {
-              sessionId: event.sessionId,
-              rootSessionId: turn.rootSessionId,
-              traceSessionId: turn.traceSessionId,
-              turnId: event.turnId,
-              agentName,
-              frameworkVersion: input.frameworkVersion,
-            },
-            data: {
-              type: "activation",
-              options: runtimeAttributes.agentActivationMetadata({
-                session,
-                turn,
+          const runtime = await lifecycle.resolve(
+            eveScopeRecord(
+              {
+                ...turn,
                 sessionId: event.sessionId,
-              }),
-            },
-            content: {
-              recordInputs: session?.decision?.action === "record" && session.decision.recordInputs,
-              recordOutputs:
-                session?.decision?.action === "record" && session.decision.recordOutputs,
-            },
-          });
-          await bound.finish({
+                turnId: event.turnId,
+                agentName,
+                frameworkVersion: input.frameworkVersion,
+                reference: turn.context,
+                startTimeMs: turn.startTimeMs,
+                links: agentActivationLinks(turn),
+                content: {
+                  recordInputs:
+                    session?.decision?.action === "record" && session.decision.recordInputs,
+                  recordOutputs:
+                    session?.decision?.action === "record" && session.decision.recordOutputs,
+                },
+              },
+              `${event.sessionId}:${event.turnId}`,
+              {
+                type: "activation",
+                options: runtimeAttributes.agentActivationMetadata({
+                  session,
+                  turn,
+                  sessionId: event.sessionId,
+                }),
+              },
+            ),
+            { deferred: true, executionContext: parentContext },
+          );
+          await runtime.finish({
             usage: turn.modelUsage,
             outcome:
               turn.terminal === undefined
@@ -353,32 +351,19 @@ export function createAgentOtelInstrumentation(
     const attempt = steps.get(event.scope);
     if (attempt === undefined) return;
     attempt.runtime.modelSelected(event.model.modelId, event.model.provider);
-    const bound = await bindEveTraceScope({
-      tracer: input.tracer,
-      key: event.idempotencyKey,
-      parent: attempt.context,
-      identity: {
-        sessionId: event.scope.sessionId,
-        rootSessionId: event.scope.rootSessionId ?? event.scope.sessionId,
-        traceSessionId: traceSessionIdOf(event.scope),
-        turnId: event.scope.turnId,
-        agentName: event.scope.functionId,
-        frameworkVersion: input.frameworkVersion,
+    const runtime = await attempt.runtime.model(
+      {
+        provider: event.model.provider,
+        modelId: event.model.modelId,
+        messages: recordInputs ? event.input?.messages : undefined,
+        instructions: recordInputs ? event.input?.instructions : undefined,
+        runtimeContext: event.runtimeContext,
       },
-      data: {
-        type: "model",
-        options: {
-          provider: event.model.provider,
-          modelId: event.model.modelId,
-          messages: recordInputs ? event.input?.messages : undefined,
-          instructions: recordInputs ? event.input?.instructions : undefined,
-          runtimeContext: event.runtimeContext,
-        },
-      },
-    });
+      { key: event.idempotencyKey, executionContext: attempt.context },
+    );
     const state = {
-      ...bound,
-      context: trace.setSpan(attempt.context, trace.wrapSpanContext(bound.runtime.reference)),
+      runtime,
+      context: trace.setSpan(attempt.context, trace.wrapSpanContext(runtime.reference)),
     };
     getExecutionContexts(event.scope).set(event.idempotencyKey, state.context);
     getSpanStates(modelSpans, event.scope).set(event.idempotencyKey, state);
@@ -391,10 +376,10 @@ export function createAgentOtelInstrumentation(
     const state = takeSpanState(modelSpans, event.scope, event.idempotencyKey);
     if (state === undefined) return;
     if (event.type === "model.call.failed") {
-      await state.finish({ failed: true, error: event.error });
+      await state.runtime.finish({ failed: true, error: event.error });
     } else {
       await recordTurnUsage(event);
-      await state.finish({
+      await state.runtime.finish({
         model: { ...event, content: recordOutputs ? event.content : undefined },
       });
       const attempt = steps.get(event.scope);
@@ -536,7 +521,7 @@ export function createAgentOtelInstrumentation(
 
   function drainOpenSpans(event: InstrumentationStepAttemptTerminalEvent): void {
     for (const state of modelSpans.get(event.scope)?.values() ?? []) {
-      void state.finish({
+      void state.runtime.finish({
         failed: event.type === "step.attempt.failed",
         error: event.type === "step.attempt.failed" ? event.error : undefined,
       });

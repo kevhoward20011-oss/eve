@@ -1,10 +1,4 @@
-import {
-  ROOT_CONTEXT,
-  context,
-  trace,
-  type Context,
-  type Tracer,
-} from "#compiled/@opentelemetry/api/index.js";
+import { ROOT_CONTEXT, context, trace, type Context } from "#compiled/@opentelemetry/api/index.js";
 
 import { contextStorage } from "#context/container.js";
 import { SessionTraceSeedKey } from "#context/keys.js";
@@ -20,7 +14,6 @@ import {
   applyLiveDeliveryAudienceCeiling,
   resolveForwardedTraceSeed,
 } from "#shared/forwarded-trace-policy.js";
-import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import { isAgentTraceContext, markAgentTraceContext } from "#tracing/agent-trace-context.js";
 import type { AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
@@ -28,9 +21,10 @@ import { withErrorContent } from "#tracing/error-content-context.js";
 import { isSampledTrace } from "#tracing/sampled-trace.js";
 import { suppressTracing } from "#tracing/suppress-tracing.js";
 import type { ConversationEnvironment } from "#shared/conversation-context.js";
-import { bindEveTraceScope, type EveTraceScope } from "#tracing/adapters/eve/scopes.js";
+import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
+import type { RuntimeScope, createTraceLifecycle } from "#tracing/core/scopes.js";
 
-type SpanState = EveTraceScope & { readonly context: Context };
+type SpanState = { readonly runtime: RuntimeScope; readonly context: Context };
 
 interface AgentMemoryInstrumentation {
   readonly events: Pick<
@@ -44,10 +38,11 @@ interface AgentMemoryInstrumentation {
 }
 
 export function createAgentMemoryInstrumentation(input: {
+  readonly lifecycle: ReturnType<typeof createTraceLifecycle>;
+  readonly idGenerator: import("#tracing/agent-span-id-generator.js").AgentSpanIdGenerator;
   readonly environment: ConversationEnvironment;
   readonly recordOutputs?: boolean;
   readonly stateStore: AgentTraceStateStore;
-  readonly tracer: Tracer;
 }): AgentMemoryInstrumentation {
   const recordOutputs = input.recordOutputs ?? false;
   const spans = new Map<string, SpanState>();
@@ -75,30 +70,32 @@ export function createAgentMemoryInstrumentation(input: {
     const parent = await parentContext(event);
     const parentSpan = parent === undefined ? undefined : trace.getSpan(parent)?.spanContext();
     if (parent === undefined || parentSpan === undefined || !isSampledTrace(parentSpan)) return;
-    const bound = await bindEveTraceScope({
-      tracer: input.tracer,
-      key: event.idempotencyKey,
-      parent,
-      identity: {
-        sessionId: event.sessionId,
-        rootSessionId: event.rootSessionId,
-        traceSessionId: traceSessionIdOf(event),
-        turnId: event.turnId ?? "",
-        frameworkVersion: "",
-      },
-      data: {
-        type: "memory",
-        options: {
-          operation: event.operationName,
-          phase: event.phase,
-          slot: event.slot,
-          storeId: event.storeId,
+    const reference = { ...parentSpan, spanId: input.idGenerator.allocateSpanId() };
+    const runtime = await input.lifecycle.resolve(
+      eveScopeRecord(
+        {
+          ...event,
+          turnId: event.turnId ?? "",
+          frameworkVersion: "",
+          parent: parentSpan,
+          reference,
         },
-      },
-    });
+        event.idempotencyKey,
+        {
+          type: "memory",
+          options: {
+            operation: event.operationName,
+            phase: event.phase,
+            slot: event.slot,
+            storeId: event.storeId,
+          },
+        },
+      ),
+      { executionContext: parent },
+    );
     spans.set(event.idempotencyKey, {
-      context: trace.setSpan(parent, trace.wrapSpanContext(bound.runtime.reference)),
-      ...bound,
+      context: trace.setSpan(parent, trace.wrapSpanContext(runtime.reference)),
+      runtime,
     });
   };
 
@@ -106,7 +103,7 @@ export function createAgentMemoryInstrumentation(input: {
     const state = spans.get(event.idempotencyKey);
     if (state === undefined) return;
     spans.delete(event.idempotencyKey);
-    await state.finish(
+    await state.runtime.finish(
       event.type === "memory.operation.failed"
         ? { failed: true, error: event.error }
         : { recordCount: event.recordCount, records: event.outputRecords },

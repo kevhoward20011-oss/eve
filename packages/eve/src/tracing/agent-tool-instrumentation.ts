@@ -3,7 +3,6 @@ import {
   type Context,
   type Attributes,
   type SpanContext,
-  type Tracer,
   trace,
 } from "#compiled/@opentelemetry/api/index.js";
 
@@ -13,12 +12,12 @@ import type {
   InstrumentationToolCallTerminalEvent,
 } from "#instrumentation/lifecycle.js";
 import { actionIdempotencyKey } from "#instrumentation/lifecycle.js";
-import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";
 import { withAgentToolSpanContext } from "#tracing/agent-tool-span-context.js";
-import { bindEveTraceScope, type EveTraceScope } from "#tracing/adapters/eve/scopes.js";
+import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
+import type { RuntimeScope, createTraceLifecycle } from "#tracing/core/scopes.js";
 
 interface ToolSpanState {
   readonly actionKey: string;
@@ -31,7 +30,7 @@ interface ToolSpanState {
   readonly spanId: string;
   readonly startTimeMs: number;
   finished?: true;
-  scope?: EveTraceScope;
+  scope?: RuntimeScope;
   terminal?: InstrumentationToolCallTerminalEvent;
   pendingError?: { readonly error: unknown; readonly errorType?: string };
 }
@@ -49,6 +48,7 @@ interface AgentToolInstrumentation {
 
 /** Keeps SDK tool spans parented to actions even when SDK telemetry wins the event race. */
 export function createAgentToolInstrumentation(input: {
+  readonly lifecycle: ReturnType<typeof createTraceLifecycle>;
   readonly actionContextFor: (
     sessionId: string,
     turnId: string,
@@ -60,7 +60,6 @@ export function createAgentToolInstrumentation(input: {
   readonly resolveFallback: (
     event: InstrumentationToolCallStartedEvent,
   ) => { readonly context: Context; readonly spanContext: SpanContext } | undefined;
-  readonly tracer: Tracer;
 }): AgentToolInstrumentation {
   const byAction = new Map<string, ToolSpanState>();
   const byAttempt = new Map<string, Map<string, ToolSpanState>>();
@@ -168,11 +167,11 @@ export function createAgentToolInstrumentation(input: {
       recordOutputs: input.recordOutputs,
       setAttributes(attributes) {
         Object.assign(state.additionalAttributes, attributes);
-        state.scope?.runtime.annotate(attributes);
+        state.scope?.annotate(attributes);
       },
       recordError(error, errorType) {
         state.pendingError = { error, errorType };
-        state.scope?.runtime.error(error, errorType);
+        state.scope?.error(error, errorType);
       },
     });
     getAttemptStates(event.scope.attemptId).set(event.idempotencyKey, state);
@@ -182,33 +181,30 @@ export function createAgentToolInstrumentation(input: {
 
   async function startSpan(state: ToolSpanState, parent: Context): Promise<void> {
     if (state.scope !== undefined || state.finished === true) return;
-    state.scope = await bindEveTraceScope({
-      tracer: input.tracer,
-      idGenerator: input.idGenerator,
-      key: state.idempotencyKey,
-      parent,
-      startTimeMs: state.startTimeMs,
-      reference: { ...trace.getSpan(parent)!.spanContext(), spanId: state.spanId },
-      identity: {
-        sessionId: state.event.scope.sessionId,
-        rootSessionId: state.event.scope.rootSessionId ?? state.event.scope.sessionId,
-        traceSessionId: traceSessionIdOf(state.event.scope),
-        turnId: state.event.scope.turnId,
-        agentName: state.event.scope.functionId,
-        frameworkVersion: "",
-      },
-      data: {
-        type: "tool",
-        options: {
-          callId: state.event.callId,
-          name: state.event.toolName,
-          arguments: input.recordInputs ? state.event.input : undefined,
+    state.scope = await input.lifecycle.resolve(
+      eveScopeRecord(
+        {
+          ...state.event.scope,
+          frameworkVersion: "",
+          parent: trace.getSpan(parent)!.spanContext(),
+          startTimeMs: state.startTimeMs,
+          reference: { ...trace.getSpan(parent)!.spanContext(), spanId: state.spanId },
         },
-      },
-    });
-    state.scope.runtime.annotate(state.additionalAttributes);
+        state.idempotencyKey,
+        {
+          type: "tool",
+          options: {
+            callId: state.event.callId,
+            name: state.event.toolName,
+            arguments: input.recordInputs ? state.event.input : undefined,
+          },
+        },
+      ),
+      { executionContext: parent },
+    );
+    state.scope.annotate(state.additionalAttributes);
     if (state.pendingError !== undefined) {
-      state.scope.runtime.error(state.pendingError.error, state.pendingError.errorType);
+      state.scope.error(state.pendingError.error, state.pendingError.errorType);
     }
   }
 

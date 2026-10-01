@@ -1,5 +1,4 @@
 import type { H3Event } from "nitro";
-import { annotateChannelRequest } from "#tracing/adapters/eve/span.js";
 import {
   context as otelContext,
   trace as otelTrace,
@@ -80,11 +79,11 @@ export async function dispatchChannelRequest(
     // (`channel:<name>`) over the raw adapter kind — behaviorless authored
     // channels keep adapter kind `"http"`, so the adapter alone would report
     // `"http"` where the rest of the trace reports `channel:<name>`.
-    if (span !== undefined) annotateChannelRequest(span, { channelName: matchedChannel.name });
+    span?.channel({ channelName: matchedChannel.name });
     const channelKind =
       getChannelInstrumentationKind(matchedChannel.definition) ?? matchedChannel.adapter?.kind;
     if (channelKind !== undefined) {
-      if (span !== undefined) annotateChannelRequest(span, { channelKind });
+      span?.channel({ channelKind });
     }
 
     const routeArgs = await buildRouteArgs(
