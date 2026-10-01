@@ -27,21 +27,7 @@ interface BrokenCell {
 const channels: readonly {
   readonly driver: () => ChannelDriver;
   readonly broken?: Partial<Record<HitlRule, BrokenCell>>;
-}[] = [
-  { driver: chatSdkDriver },
-  { driver: slackDriver },
-  {
-    driver: telegramDriver,
-    broken: {
-      "a text reply matching an option answers the only pending question": {
-        reason: "the reply's context block reaches the model as its own message after the answer",
-        // The question resolves, then the bot answers the leftover context block.
-        symptom:
-          /Timed out waiting for ask_question to return[\s\S]*Bootstrap reply \[Tool execution\]: <telegram_context>/,
-      },
-    },
-  },
-];
+}[] = [{ driver: chatSdkDriver }, { driver: slackDriver }, { driver: telegramDriver }];
 
 describe.each(channels.map((entry) => ({ ...entry, name: entry.driver().name })))(
   "$name HITL contract",
