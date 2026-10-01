@@ -737,20 +737,36 @@ function toolsChannel(input: Partial<Parameters<typeof mcpChannel>[0]> = {}) {
       principalType: "user",
     }),
     requestStateSecret: SECRET,
+    tools: true,
     ...input,
   });
 }
 
+const AGENT_TOOL_NAMES = ["agent_start", "agent_get", "agent_update", "agent_cancel"];
+
+/** The `agent_*` entries a default channel lists, where the SDK builds them. */
+async function defaultAgentTools(): Promise<unknown[]> {
+  const listed = await rpc(
+    toolsChannel({ tools: false }),
+    modernRequest("tools/list"),
+    routeArgs({ description: toolsDescription }),
+  );
+  return listed.result?.tools ?? [];
+}
+
 describe("mcpChannel tools", () => {
-  it("lists invocable tools in order with schemas as compiled, approval meta, and cache hints", async () => {
+  it("lists the agent_* tools as a default channel does, then invocable tools in order", async () => {
     const channel = toolsChannel();
     const args = routeArgs({ description: toolsDescription });
     const listed = await rpc(channel, modernRequest("tools/list"), args);
+    const agentTools = await defaultAgentTools();
 
+    expect(agentTools.map((tool) => (tool as { name: string }).name)).toEqual(AGENT_TOOL_NAMES);
     expect(listed.result).toEqual({
       cacheScope: "private",
       resultType: "complete",
       tools: [
+        ...agentTools,
         {
           _meta: { "dev.eve/approval": true },
           description: "Deploys.",
@@ -780,29 +796,102 @@ describe("mcpChannel tools", () => {
       routeArgs({ description: toolsDescription }),
     );
     expect(listed.result?.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      ...AGENT_TOOL_NAMES,
       "deploy",
       "issues",
       "plain",
     ]);
   });
 
-  it("tools: false removes the capability, the extension, the list, and calls", async () => {
+  it("reserves the agent_* names over an agent tool with the same name", async () => {
+    const invokeTool = fakeCore();
+    const description: AgentDescription = {
+      ...toolsDescription,
+      tools: [
+        {
+          approval: false,
+          description: "An authored tool that collides.",
+          inputSchema: { type: "object" },
+          invocable: true,
+          name: "agent_start",
+        },
+        ...toolsDescription.tools,
+      ],
+    };
+    const args = routeArgs({ description, invokeTool });
+    const listed = await rpc(toolsChannel(), modernRequest("tools/list"), args);
+    const names = listed.result?.tools.map((tool: { name: string }) => tool.name);
+    expect(names.filter((name: string) => name === "agent_start")).toHaveLength(1);
+    expect(listed.result?.tools[0]).toEqual((await defaultAgentTools())[0]);
+
+    const called = await rpc(
+      toolsChannel(),
+      modernRequest("tools/call", { arguments: {}, name: "agent_start" }),
+      args,
+    );
+    expect(called.result?.isError).toBe(true);
+    expect(invokeTool).not.toHaveBeenCalled();
+  });
+
+  it("validates agent_* input the same way whether or not tools are published", async () => {
+    const call = modernRequest("tools/call", { arguments: { message: "" }, name: "agent_start" });
+    const args = routeArgs({ description: toolsDescription });
+    const published = await rpc(toolsChannel(), call.clone(), args);
+    const unpublished = await rpc(toolsChannel({ tools: false }), call, args);
+
+    expect(published.result?.isError).toBe(true);
+    expect(published.result?.content).toEqual(unpublished.result?.content);
+    expect(published.result?.content[0].text).toContain(
+      "Input validation error: Invalid arguments for tool agent_start",
+    );
+  });
+
+  it("starts agent_* work as the route caller, not the forwarded principal", async () => {
+    const createSession = vi.fn(async () => {
+      throw new Error("stop after createSession");
+    });
+    const header = Buffer.from(
+      JSON.stringify({
+        current: {
+          attributes: {},
+          authenticator: "oidc",
+          principalId: "end-user",
+          principalType: "user",
+        },
+      }),
+    ).toString("base64url");
+    await rpc(
+      toolsChannel({ trustedForwarders: () => true }),
+      modernRequest(
+        "tools/call",
+        { arguments: { message: "hello" }, name: "agent_start" },
+        { headers: { "eve-forwarded-principal": header, "x-test-principal": "router" } },
+      ),
+      routeArgs({ createSession: createSession as never, description: toolsDescription }),
+    );
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0]).toMatchObject({ auth: { principalId: "router" } });
+  });
+
+  it("tools: false serves only the agent_* tools, without the tool-sessions extension", async () => {
     const invokeTool = fakeCore();
     const channel = toolsChannel({ tools: false });
     const args = routeArgs({ description: toolsDescription, invokeTool });
 
     const discovered = await rpc(channel, modernRequest("server/discover"), args);
-    expect(discovered.result?.capabilities.tools).toBeUndefined();
+    expect(discovered.result?.capabilities.tools).toEqual({ listChanged: false });
     expect(discovered.result?.capabilities.extensions?.["dev.eve/tool-sessions"]).toBeUndefined();
 
     const listed = await rpc(channel, modernRequest("tools/list"), args);
-    expect(listed.error?.code).toBe(-32_601);
+    expect(listed.result?.tools.map((tool: { name: string }) => tool.name)).toEqual(
+      AGENT_TOOL_NAMES,
+    );
     const called = await rpc(
       channel,
       modernRequest("tools/call", { arguments: { x: 1 }, name: "plain" }),
       args,
     );
-    expect(called.error?.code).toBe(-32_601);
+    expect(called.error?.code).toBe(-32_602);
     expect(invokeTool).not.toHaveBeenCalled();
   });
 

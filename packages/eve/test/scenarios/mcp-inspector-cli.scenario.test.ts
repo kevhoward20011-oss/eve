@@ -61,6 +61,8 @@ describe("MCP Inspector CLI against mcpChannel", () => {
             'import { mcpChannel } from "eve/channels/mcp";',
             "",
             "export default mcpChannel({",
+            "  tools: true,",
+            "  skills: true,",
             "  auth: (request) =>",
             `    request.headers.get("authorization") === "Bearer ${TOKEN}"`,
             '      ? { attributes: {}, authenticator: "scenario", principalId: "inspector", principalType: "user" }',

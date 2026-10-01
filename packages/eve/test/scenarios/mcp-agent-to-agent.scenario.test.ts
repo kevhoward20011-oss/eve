@@ -73,6 +73,8 @@ const AGENT_B_FILES = {
   "agent/channels/mcp.ts": `import { mcpChannel } from "eve/channels/mcp";
 
 export default mcpChannel({
+  tools: true,
+  skills: true,
   auth: (request) => {
     const principalId = request.headers.get("x-test-principal");
     if (principalId === null) return null;

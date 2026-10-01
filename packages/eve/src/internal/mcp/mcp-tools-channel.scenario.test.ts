@@ -29,6 +29,8 @@ const DESCRIPTOR: ScenarioAppDescriptor = {
     "agent/channels/mcp.ts": `import { mcpChannel } from "eve/channels/mcp";
 
 export default mcpChannel({
+  tools: true,
+  skills: true,
   auth: (request) => {
     const principalId = request.headers.get("x-test-principal");
     if (principalId === null) return null;
@@ -160,7 +162,9 @@ describe("mcpChannel tools over real HTTP", () => {
     expect(listed.result).toMatchObject({ cacheScope: "private", ttlMs: 300_000 });
     const tools = listed.result!.tools as Json[];
     const names = tools.map((tool) => tool.name);
-    expect(names).toEqual([...names].sort());
+    // The channel's own agent_* tools come first; the agent's tools follow in name order.
+    expect(names.slice(0, 4)).toEqual(["agent_start", "agent_get", "agent_update", "agent_cancel"]);
+    expect(names.slice(4)).toEqual([...names.slice(4)].sort());
     expect(names).toEqual(expect.arrayContaining(["deploy", "echo", "issues"]));
     expect(tools.find((tool) => tool.name === "deploy")).toMatchObject({
       _meta: { "dev.eve/approval": true },
