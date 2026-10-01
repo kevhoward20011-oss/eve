@@ -10,7 +10,6 @@ packages:
 
 allowBuilds:
   "@google/genai": false # No-op preinstall.
-  "@modelcontextprotocol/inspector": false # Postinstall only installs clients in a source checkout.
   braintrust: false # Installs an optional CLI binary; the SDK does not need it.
   bufferutil: false # The package already includes the supported prebuilt bindings.
   core-js-pure: false # Not needed at runtime; avoids unapproved lifecycle scripts.
