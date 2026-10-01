@@ -20,6 +20,7 @@ import {
 } from "#protocol/message.js";
 import type { InputResponse } from "#shared/input.js";
 import { resolveTextToResponse } from "#channel/resolve-text.js";
+import { inputTextKey, readAnswerText } from "#internal/input-text.js";
 import { SESSION_LIMIT_STOP_OPTION_ID } from "#harness/session-limit-continuation.js";
 
 // ---------------------------------------------------------------------------
@@ -253,7 +254,7 @@ export function routeDeliverPayload(input: {
     if (key === "inputResponses" || value === undefined) {
       continue;
     }
-    if (key === "message" && message.consumed) continue;
+    if ((key === "message" || key === inputTextKey) && message.consumed) continue;
 
     remainder[key] = value;
   }
@@ -318,9 +319,10 @@ function resolveMessageAgainstQuestions(input: {
   if (questions.length === 0) return none;
 
   const [only] = questions;
+  const text = readAnswerText(input.payload);
   const answer =
-    pending.length === 1 && only !== undefined && typeof input.payload.message === "string"
-      ? resolveTextToResponse(input.payload.message, only)
+    pending.length === 1 && only !== undefined && text !== undefined
+      ? resolveTextToResponse(text, only)
       : undefined;
   if (answer !== undefined) return { consumed: true, responses: [answer] };
   return none;

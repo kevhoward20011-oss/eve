@@ -29,15 +29,7 @@ const channels: readonly {
   readonly broken?: Partial<Record<HitlRule, BrokenCell>>;
 }[] = [
   { driver: chatSdkDriver },
-  {
-    driver: slackDriver,
-    broken: {
-      "a text reply matching an option answers the only pending question": {
-        reason: "the answer is the whole <slack_message> envelope",
-        symptom: /ask_question returned \{"answer":"<slack_message>/,
-      },
-    },
-  },
+  { driver: slackDriver },
   {
     driver: telegramDriver,
     broken: {

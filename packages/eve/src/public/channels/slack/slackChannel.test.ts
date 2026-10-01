@@ -14,6 +14,7 @@ import type { SessionAuthContext } from "#channel/types.js";
 import { isHttpRouteDefinition } from "#channel/routes.js";
 import { ContextContainer, contextStorage } from "#context/container.js";
 import { AuthKey, SessionKey } from "#context/keys.js";
+import { readInputText } from "#internal/input-text.js";
 import { captureLogRecords } from "#internal/testing/log-records.js";
 import {
   mockChannelContext,
@@ -2963,6 +2964,34 @@ describe("slackChannel() inbound mention pipeline", () => {
         "</slack_message>",
       ].join("\n"),
     );
+  });
+
+  it.each([
+    ["default HITL config", {}, "approve"],
+    ["a custom input response hook", { onInputResponse: () => null }, undefined],
+    ["an approval channel", { approvalChannel: () => "thread" as const }, undefined],
+  ])("carries the typed text for pending input with %s", async (_, config, expected) => {
+    const channel = slackChannel({
+      credentials: { botToken: "xoxb-test" },
+      onAppMention: () => ({ auth: null }),
+      ...config,
+    });
+    const body = buildEventBody(
+      {
+        channel: "C01",
+        event_ts: "1700000000.000001",
+        text: "<@U_BOT> approve",
+        ts: "1700000000.000001",
+        type: "app_mention",
+        user: "U_REQUESTER",
+      },
+      { authorizations: [{ user_id: "U_BOT" }] },
+    );
+
+    const { send } = await firePost(channel, buildSignedRequest({ body }));
+
+    const [, input] = send.mock.calls[0]!;
+    expect(readInputText(input)).toBe(expected);
   });
 
   it("marks an accepted unmentioned direct message as not mentioned", async () => {

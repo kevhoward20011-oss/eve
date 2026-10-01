@@ -16,6 +16,7 @@ import type { SessionContext } from "#public/definitions/callback-context.js";
 import type { ChannelContinuationOps } from "#public/definitions/channel.js";
 
 import { createLogger, logError } from "#internal/logging.js";
+import { attachInputText } from "#internal/input-text.js";
 import type { UnstampedMessageStreamEvent } from "#protocol/message.js";
 import type {
   InputRequest,
@@ -1111,6 +1112,10 @@ async function handleEventPost(input: {
         kind,
         message,
         received: input.received,
+        // A typed reply would bypass a custom `onInputResponse` and could answer
+        // a request `approvalChannel` sent privately, so either one disables it.
+        resolvesTypedInput:
+          config.onInputResponse === undefined && config.approvalChannel === undefined,
         threadContext: config.threadContext,
         uploadPolicy: input.uploadPolicy,
       });
@@ -1201,6 +1206,7 @@ async function dispatchSlackMessage(input: {
   readonly kind: "app_mention" | "channel_message" | "direct_message";
   readonly message: SlackMessage;
   readonly received: SlackRenderChain["received"];
+  readonly resolvesTypedInput: boolean;
   readonly threadContext: LoadThreadContextMessagesOptions | undefined;
   readonly uploadPolicy: UploadPolicy;
 }): Promise<void> {
@@ -1295,6 +1301,7 @@ async function dispatchSlackMessage(input: {
     isPrivateConversation,
     isMentioned: isBotMentioned,
     message: input.message,
+    resolvesTypedInput: input.resolvesTypedInput,
     result,
     sessionOperations,
     thread,
@@ -1419,6 +1426,7 @@ async function deliverSlackMessage(input: {
   readonly isMentioned: boolean;
   readonly kind: string;
   readonly message: SlackMessage;
+  readonly resolvesTypedInput: boolean;
   readonly result: Exclude<SlackInboundResult, null>;
   readonly thread: SlackThread;
   readonly threadContext: LoadThreadContextMessagesOptions | undefined;
@@ -1458,15 +1466,25 @@ async function deliverSlackMessage(input: {
     const title = input.isPrivateConversation
       ? PRIVATE_SLACK_RUN_TITLE
       : (input.result.title ?? message.markdown);
-    const sendOptions: SlackSendOptions =
+    const sendOptions: SlackSendOptions = attachInputText(
       channelContext.length === 0
         ? { auth: input.result.auth, title }
-        : { auth: input.result.auth, context: channelContext, title };
+        : { auth: input.result.auth, context: channelContext, title },
+      // The envelope stays model-visible; pending input matches what the person typed.
+      input.resolvesTypedInput && fileParts.length === 0
+        ? slackTypedText(message.text, input.botUserId)
+        : undefined,
+    );
 
     await input.sessionOperations.send(turnMessage, sendOptions);
   } catch (error) {
     logError(log, `${input.kind} delivery failed`, error, { channelId: message.channelId });
   }
+}
+
+function slackTypedText(text: string, botUserId: string | undefined): string {
+  if (botUserId === undefined) return text;
+  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "gu"), "").trim();
 }
 
 /**
