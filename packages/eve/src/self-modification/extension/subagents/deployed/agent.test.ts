@@ -91,7 +91,7 @@ describe("deployed self-modification delegation", () => {
       expect(description).toContain("exact tool or skill identifiers");
       expect(description).toContain("Questions, investigations, and design requests are read-only");
       expect(description).toContain("only an explicit implementation request");
-      expect(description).toContain("same child with agentId");
+      expect(description).toContain("same child with taskId");
       expect(description).toContain("does not change the running agent, even on the next turn");
       expect(description).not.toContain("/source");
     },

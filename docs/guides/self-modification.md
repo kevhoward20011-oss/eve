@@ -47,37 +47,51 @@ export default selfModification({
 });
 ```
 
-`authorize`, `github.repository` (in `owner/repo` form), and `github.connector` are required. `directory` is the application directory relative to the repository root and defaults to `"."`; `baseBranch` is the branch pull requests target and defaults to `"main"`. `authorize` receives the current authenticated `principal` (or `null`) and the request's `channel` kind and metadata. The callback must return `true` to make the coding subagent available; `false` or a thrown error hides it, and a thrown error is logged. It runs on session start and each turn, including follow-ups. The example principal ID is illustrative: check the identities produced by your channel before writing your policy. Setup scaffolds `authorize: () => true`, which lets any caller who can reach the deployed agent request draft PRs, and warns you about it. We recommend replacing it with a policy that admits only trusted callers before you deploy. If your mount file already contains settings you wrote, setup does not rewrite it; it prints the `deployed` option for you to add.
+The `deployed` option accepts:
 
-This is a delegation gate, not a per-GitHub-command authorization check. GitHub access is determined separately by the connector installation and repository permissions. The top-level `model` and `reasoning` options apply to both the local and deployed subagents. The deployed subagent's sandbox runs on Vercel Sandbox, or on microsandbox for self-hosted deployments; on other hosts, delegation fails with an error naming the supported providers. The repository must contain the configured application and its `agent/` directory. The sandbox checks out the repository before the child works in it. The child installs project dependencies when needed, using the repository's package manager and lockfile. The project `eve` CLI is available only after its dependencies are installed; in a monorepo, it may live at the workspace root rather than the application directory. Private packages need their own installation credentials; the sandbox does not inherit host credentials.
+- `authorize` (required): decides whether the current caller can delegate to the coding subagent.
+- `github.repository` (required): the repository to check out and open pull requests against, in `owner/repo` form.
+- `github.connector` (required): the GitHub Vercel Connect connector that provides repository credentials.
+- `directory`: the application directory relative to the repository root. Defaults to `"."`.
+- `baseBranch`: the branch pull requests target. Defaults to `"main"`.
 
-Provision a GitHub Vercel Connect connector, attach it to the deployed project, and restrict its installation to **only the configured repository**. Give it the repository permissions needed to read source, push branches, and create pull requests. Require review with repository rules that prevent the bot from bypassing protected branches. The `github.repository` setting chooses the intended checkout and PR target, **not** an access restriction on the connector: the coding tool can request tokens for other repositories in the connector's installation. Do not expose production secrets to CI or preview deployments triggered by bot-authored pushes.
+The top-level `model` and `reasoning` options apply to both the local and deployed subagents.
 
-Ask for persistent changes in ordinary terms, such as “Replace your hardcoded weather tool with a live weather API.” The parent delegates source work to the self-modification child, which has its own repository checkout. The source does not need to exist in the parent's sandbox. Questions about possible changes are read-only; they do not authorize publication.
+### Authorize callers
 
-An explicit implementation request authorizes a draft PR. Ask for an investigation or design instead when you want read-only work. The child works in `/workspace/repository`; its application directory is context, not a limit on which repository files it may edit. It uses a child-owned sandbox for repository work and reuses the checkout on follow-up turns. Continue with the same child for follow-ups; independent requests should use separate children. The running parent is not redeployed or updated by a source proposal. Review and merge the PR, then deploy separately. A lost sandbox is not silently restored from an unpublished checkout.
+`authorize` receives the current authenticated `principal`, or `null` for anonymous callers, and the request's `channel` kind and metadata. Return `true` to offer the coding subagent. Returning `false` or throwing hides it, and eve logs the thrown error. The callback runs on session start and on each turn, including follow-ups.
 
-To add a registry capability, the child first installs project dependencies if necessary, then searches using the checkout-installed `eve registry search "slack" --json` and installs source with `eve add channel/slack --non-interactive --skip-setup`. This **does not activate the integration**. Inspect the installed source and dependency diff, then complete OAuth, secret binding, or other external setup after review and deployment. The handoff should distinguish the PR URL and checks run from outstanding setup; do not send secret values in chat.
+The principal ID in the example is illustrative. Check the identities your channel produces before you write a policy.
 
-### Troubleshoot deployed proposals
+### Connect GitHub
 
-| Symptom                                                | Check                                                                                                                                                                                                                          | Next action                                                                                                                                                      |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent says it cannot change its tools                  | Check whether the model received the self-modification child tool. A denied `authorize` callback also omits the child; a resolver error appears in server logs as `Dynamic subagent resolver (...) threw — omitting subagent.` | If the tool is missing, check the caller's principal and policy, then investigate any logged resolver error. If present, check the parent's delegation guidance. |
-| Checkout or GitHub command fails                       | Check that the Connect connector is attached to the deployed project and installed on the configured repository with read/write permissions.                                                                                   | Fix the connector installation or permissions; do not paste a token into chat or sandbox files.                                                                  |
-| Dependency installation fails                          | Check the checkout's package manager, lockfile, and private-package access.                                                                                                                                                    | Provide package access through an appropriate isolated setup, not inherited production credentials.                                                              |
-| Push succeeds but no PR appears                        | Inspect the working branch and existing PR on GitHub.                                                                                                                                                                          | Resolve the reported publication failure and continue the same child; do not create an unrelated branch.                                                         |
-| Registry files exist but the integration does not work | Check which external setup steps remain in the handoff.                                                                                                                                                                        | Complete those steps after reviewing and deploying the source change.                                                                                            |
+Create a GitHub Vercel Connect connector, attach it to the deployed project, and install it on the configured repository. Grant the repository permissions needed to read source, push branches, and create pull requests. Use repository rules to require review on protected branches.
+
+### Sandbox and checkout
+
+The deployed subagent's sandbox runs on Vercel Sandbox, or on microsandbox for self-hosted deployments. On other hosts, delegation fails with an error naming the supported providers.
+
+The sandbox checks out the repository to `/workspace/repository`, which must contain the configured application and its `agent/` directory. The subagent installs dependencies when needed, using the repository's package manager and lockfile. The project `eve` CLI is available after installation; in a monorepo, it may live at the workspace root. Private packages need their own installation credentials because the sandbox does not inherit host credentials.
+
+### Request a change
+
+Ask for persistent changes in ordinary terms, such as “Replace your hardcoded weather tool with a live weather API.” The parent delegates the work to the coding subagent, which has its own checkout, so the source does not need to exist in the parent's sandbox.
+
+Questions, investigations, and design requests are read-only. An explicit implementation request authorizes the subagent to push a branch and open a draft PR. It may edit any file in the repository; the application directory gives it context.
+
+Follow-up turns continue the same subagent and reuse its checkout. Independent requests use a separate subagent. A draft PR does not change the running agent: review and merge it, then deploy.
+
+To add a registry capability, the subagent searches with `eve registry search "slack" --json` and installs source with `eve add channel/slack --non-interactive --skip-setup`. Complete OAuth, secret binding, and other external setup after you review and deploy the change. The subagent's handoff lists the PR URL, the checks it ran, and any remaining setup.
 
 ## Run without self-modification
 
-Pass `--no-default-extensions` when you do not want `eve dev` to mount bundled development extensions:
+Self-modification runs when you mount the extension yourself under `agent/extensions/`, or when you run `eve dev`, which mounts the bundled extension by default. To start `eve dev` without the bundled extension, pass `--no-default-extensions`:
 
 ```bash
 eve dev --no-default-extensions
 ```
 
-This disables the complete bundled default set for that server, including self-modification. It does not remove files from your project or disable extensions that you have explicitly mounted under `agent/extensions/`.
+This flag disables all bundled development extensions for that server, including self-modification. It does not affect an extension you have mounted yourself; remove that mount to turn it off.
 
 ## What to read next
 
