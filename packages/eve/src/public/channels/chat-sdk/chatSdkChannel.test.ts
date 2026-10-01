@@ -718,7 +718,7 @@ describe("chatSdkChannel", () => {
     expect(state.pendingToolCallMessage).toBe("Let me check that.");
   });
 
-  it("renders input requests as Chat SDK cards and resumes on button actions", async () => {
+  it("renders input requests as Chat SDK cards with one button per option", async () => {
     const adapter = testAdapter();
     const bridge = chatSdkChannel({
       adapters: { test: adapter },
@@ -779,17 +779,6 @@ describe("chatSdkChannel", () => {
         },
       ],
       type: "card",
-    });
-
-    const { send } = await firePost(bridge.channel, "/eve/v1/test", {
-      actionId: "eve_input:request-1:approve",
-      kind: "action",
-      value: "approve",
-    });
-
-    expect(send).toHaveBeenCalledWith(THREAD_ID, {
-      auth: null,
-      inputResponses: [{ optionId: "approve", requestId: "request-1" }],
     });
   });
 });

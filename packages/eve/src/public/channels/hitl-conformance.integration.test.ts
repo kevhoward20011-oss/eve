@@ -32,7 +32,6 @@ const channels: readonly {
   {
     driver: telegramDriver,
     broken: {
-      "pressing a rendered option answers the pending question with that option": "#4105",
       "a text reply matching an option answers the only pending question":
         "the leftover channel context interrupts the turn and withdraws the question",
     },
