@@ -3,31 +3,20 @@ import {
   createContextKey,
   propagation,
   trace,
-  type Attributes,
   type Context,
   type TextMapSetter,
 } from "#compiled/@opentelemetry/api/index.js";
 
-import { contentAttribute } from "#tracing/agent-otel-content.js";
-import type { TraceOperation } from "#tracing/core/engine.js";
+import type { McpLifecycle, McpUpdate } from "#tracing/core/mcp.js";
 import {
   agentToolContentPolicy,
   agentToolSpanContext,
-  annotateAgentToolSpan,
-  recordAgentToolSpanError,
   withAgentToolSpanContext,
 } from "#tracing/agent-tool-span-context.js";
 import { truncateTelemetryText } from "#tracing/telemetry-budget.js";
 import { replaceBaggageMember } from "#protocol/baggage.js";
 import { isObject } from "#shared/guards.js";
 import { eveTransportLifecycle } from "#tracing/adapters/eve/transports.js";
-import {
-  mcpAttributes,
-  mcpSessionAttributes,
-  rpcStatusAttributes,
-  CONTENT_FIELDS,
-} from "#tracing/core/contract.js";
-import { eveOutputMapping } from "#tracing/adapters/eve/compatibility.js";
 
 const MAX_MCP_TRACE_REQUEST_BYTES = 1024 * 1024;
 const MAX_MCP_TRACE_CONTEXT_BYTES = 8192;
@@ -64,15 +53,14 @@ export function createMcpTraceFetch(input: {
     const annotateRequest =
       message.method === "tools/call" || mcpMethodName(activeContext) === message.method;
     if (annotateRequest) {
-      annotateAgentToolSpan(
-        mcpRequestAttributes({
+      agentToolSpanContext(activeContext)?.mcp?.update(
+        mcpRequestMetadata({
           connectionName: input.connectionName,
           message,
           params: isObject(message.params) ? message.params : {},
           protocolVersion:
             headerValue(init?.headers, "mcp-protocol-version") ?? input.getProtocolVersion(),
         }),
-        activeContext,
       );
     }
 
@@ -83,10 +71,9 @@ export function createMcpTraceFetch(input: {
     if (annotateRequest) {
       const sessionId = response.headers.get("mcp-session-id");
       if (sessionId !== null) {
-        annotateAgentToolSpan(
-          mcpSessionAttributes(truncateTelemetryText(sessionId, 512)),
-          activeContext,
-        );
+        agentToolSpanContext(activeContext)?.mcp?.update({
+          sessionId: truncateTelemetryText(sessionId, 512),
+        });
       }
     }
     return response;
@@ -123,16 +110,10 @@ export async function withMcpToolsListSpan<T>(input: {
   readonly protocolVersion?: string;
 }): Promise<T> {
   const parent = otelContext.active();
-  const attributes = mcpRequestAttributes({
-    connectionName: input.connectionName,
-    method: "tools/list",
-    protocolVersion: input.protocolVersion,
-  });
   const span = eveTransportLifecycle("eve.mcp").mcp({
     method: "tools/list",
     connectionName: input.connectionName,
     protocolVersion: input.protocolVersion,
-    attributes,
     parent: trace.getSpan(parent)?.spanContext(),
     executionContext: parent,
     capture: { emit: true, ...agentToolContentPolicy(parent) },
@@ -140,8 +121,7 @@ export async function withMcpToolsListSpan<T>(input: {
   const spanContext = withMcpMethodName(
     withAgentToolSpanContext(trace.setSpan(parent, trace.wrapSpanContext(span.reference)), {
       ...agentToolContentPolicy(parent),
-      recordError: (error, errorType) => span.fail(error, errorType),
-      setAttributes: (spanAttributes) => setSpanAttributes(span, spanAttributes),
+      mcp: span,
     }),
     "tools/list",
   );
@@ -152,9 +132,9 @@ export async function withMcpToolsListSpan<T>(input: {
       } catch (error) {
         const code = jsonRpcErrorCode(error);
         if (code !== undefined) {
-          annotateAgentToolSpan(rpcStatusAttributes(code), spanContext);
+          span.update({ statusCode: code });
         }
-        recordAgentToolSpanError(error, errorType(error, code), spanContext);
+        span.error(error, errorType(error, code));
         throw error;
       }
     });
@@ -173,8 +153,8 @@ export async function withMcpToolCallSpan<T>(input: {
   const parent = otelContext.active();
   const existing = agentToolSpanContext(parent);
   const policy = agentToolContentPolicy(parent);
-  if (existing?.setAttributes !== undefined) {
-    annotateAgentToolSpan(mcpToolCallAttributes(input), parent);
+  if (existing?.mcp !== undefined) {
+    existing.mcp.update({ ...input, method: "tools/call" });
     return await runMcpToolCall(input, parent, undefined, policy);
   }
 
@@ -183,7 +163,6 @@ export async function withMcpToolCallSpan<T>(input: {
     connectionName: input.connectionName,
     toolName: truncateTelemetryText(input.toolName, 128),
     protocolVersion: input.protocolVersion,
-    attributes: mcpToolCallAttributes(input),
     parent: trace.getSpan(parent)?.spanContext(),
     executionContext: parent,
     capture: { emit: true, ...policy },
@@ -191,8 +170,7 @@ export async function withMcpToolCallSpan<T>(input: {
   const spanContext = withMcpMethodName(
     withAgentToolSpanContext(trace.setSpan(parent, trace.wrapSpanContext(span.reference)), {
       ...policy,
-      recordError: (error, errorType) => span.fail(error, errorType),
-      setAttributes: (attributes) => setSpanAttributes(span, attributes),
+      mcp: span,
     }),
     "tools/call",
   );
@@ -212,63 +190,44 @@ function runMcpToolCall<T>(
     readonly execute: () => Promise<T>;
   },
   context: Context,
-  fallbackSpan: TraceOperation | undefined,
+  fallbackSpan: McpLifecycle | undefined,
   policy: ReturnType<typeof agentToolContentPolicy>,
 ): Promise<T> {
   if (fallbackSpan !== undefined && policy.recordInputs) {
-    const argumentsAttribute = contentAttribute(input.arguments);
-    if (argumentsAttribute !== undefined) {
-      fallbackSpan.setAttribute(CONTENT_FIELDS.toolArguments, argumentsAttribute);
-    }
+    fallbackSpan.arguments(input.arguments);
   }
 
   return input
     .execute()
     .then((result) => {
       if (isToolErrorResult(result)) {
-        recordAgentToolSpanError(undefined, "tool_error", context);
+        agentToolSpanContext(context)?.mcp?.error(undefined, "tool_error");
       }
       if (fallbackSpan !== undefined && policy.recordOutputs) {
-        const resultAttribute = contentAttribute(result);
-        if (resultAttribute !== undefined) {
-          fallbackSpan.setAttribute(CONTENT_FIELDS.toolResult, resultAttribute);
-        }
+        fallbackSpan.result(result);
       }
       return result;
     })
     .catch((error: unknown) => {
       const code = jsonRpcErrorCode(error);
       if (code !== undefined) {
-        annotateAgentToolSpan(rpcStatusAttributes(code), context);
+        agentToolSpanContext(context)?.mcp?.update({ statusCode: code });
       }
       if (fallbackSpan !== undefined) {
-        recordAgentToolSpanError(error, errorType(error, code), context);
+        agentToolSpanContext(context)?.mcp?.error(error, errorType(error, code));
       }
       throw error;
     });
 }
 
-function mcpToolCallAttributes(input: {
-  readonly connectionName: string;
-  readonly protocolVersion?: string;
-  readonly toolName: string;
-}): Attributes {
-  return mcpRequestAttributes({
-    connectionName: input.connectionName,
-    method: "tools/call",
-    protocolVersion: input.protocolVersion,
-    toolName: input.toolName,
-  });
-}
-
-function mcpRequestAttributes(input: {
+function mcpRequestMetadata(input: {
   readonly connectionName: string;
   readonly message?: JsonRpcRequest;
   readonly method?: string;
   readonly params?: Record<string, unknown>;
   readonly protocolVersion?: string;
   readonly toolName?: string;
-}): Attributes {
+}): McpUpdate {
   const method = input.method ?? input.message?.method;
   const params = input.params ?? (isObject(input.message?.params) ? input.message.params : {});
   const toolName =
@@ -280,19 +239,16 @@ function mcpRequestAttributes(input: {
     (isObject(meta) && typeof meta["io.modelcontextprotocol/protocolVersion"] === "string"
       ? meta["io.modelcontextprotocol/protocolVersion"]
       : undefined);
-  return eveOutputMapping().attributes(
-    { type: "mcp", operationId: input.connectionName },
-    mcpAttributes({
-      connectionName: input.connectionName,
-      method: method ?? "unknown",
-      toolName,
-      protocolVersion,
-      requestId:
-        typeof requestId === "number" || typeof requestId === "string"
-          ? String(requestId)
-          : undefined,
-    }),
-  );
+  return {
+    connectionName: input.connectionName,
+    method: method ?? "unknown",
+    toolName,
+    protocolVersion,
+    requestId:
+      typeof requestId === "number" || typeof requestId === "string"
+        ? String(requestId)
+        : undefined,
+  };
 }
 
 interface JsonRpcRequest extends Record<string, unknown> {
@@ -367,12 +323,6 @@ function jsonRpcErrorCode(error: unknown): string | undefined {
 function errorType(error: unknown, code: string | undefined): string | undefined {
   if (code !== undefined) return code;
   return error instanceof Error ? error.name || "Error" : undefined;
-}
-
-function setSpanAttributes(span: TraceOperation, attributes: Attributes): void {
-  for (const [name, value] of Object.entries(attributes)) {
-    if (value !== undefined) span.setAttribute(name, value);
-  }
 }
 
 function withMcpMethodName(context: Context, methodName: string): Context {

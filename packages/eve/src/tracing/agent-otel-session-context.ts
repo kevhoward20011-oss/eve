@@ -17,11 +17,9 @@ import {
 } from "#tracing/sampled-trace.js";
 import type { AgentSessionTraceState, AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import { readInstrumentationDecision } from "#shared/instrumentation-decision.js";
-import {
-  agentInvocationSpanName,
-  type AgentSamplingOperation,
-} from "#tracing/agent-span-contract.js";
-import { agentActivationAttributes } from "#tracing/agent-otel-runtime-context.js";
+import { type AgentSamplingOperation } from "#tracing/agent-span-contract.js";
+import { agentActivationMetadata } from "#tracing/agent-otel-runtime-context.js";
+import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
 import type { AgentTurnTraceState } from "#tracing/agent-trace-state.js";
 import { applyPrincipalTraceDecision } from "#instrumentation/principal-summary.js";
 import { normalizeInstrumentationChannelKind } from "#internal/instrumentation.js";
@@ -29,6 +27,9 @@ import type { ConversationEnvironment } from "#shared/conversation-context.js";
 import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 
 interface AgentOtelSessionContextInput {
+  readonly lifecycle: ReturnType<
+    typeof import("#tracing/core/agent-tracing.js").createAgentTracing
+  >["lifecycle"];
   readonly environment: ConversationEnvironment;
   readonly frameworkVersion: string;
   readonly idGenerator: AgentSpanIdGenerator;
@@ -116,18 +117,23 @@ export function createAgentOtelSessionContext(
     };
     if (isSampledTrace(turn.context)) {
       const agentName = session.agentName ?? turn.subagentName;
-      const sampled =
-        input.samplesTrace?.(turn.context.traceId, {
-          name: agentInvocationSpanName(agentName),
-          attributes: agentActivationAttributes({
-            agentName,
-            frameworkVersion: input.frameworkVersion,
-            session,
+      const sampled = input.lifecycle.sample(
+        eveScopeRecord(
+          {
+            ...turn,
             sessionId: event.sessionId,
             turnId: event.turnId,
-            turn,
-          }),
-        }) ?? true;
+            agentName,
+            frameworkVersion: input.frameworkVersion,
+            reference: turn.context,
+          },
+          event.idempotencyKey,
+          {
+            type: "activation",
+            options: agentActivationMetadata({ session, turn, sessionId: event.sessionId }),
+          },
+        ),
+      );
       turnContext = { ...turnContext, traceFlags: sampled ? 1 : 0 };
     }
     await input.stateStore.setTurn(event.sessionId, event.turnId, {

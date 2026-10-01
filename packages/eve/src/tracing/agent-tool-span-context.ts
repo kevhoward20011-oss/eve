@@ -1,9 +1,9 @@
 import {
   context as otelContext,
   createContextKey,
-  type Attributes,
   type Context,
 } from "#compiled/@opentelemetry/api/index.js";
+import type { McpLifecycle } from "#tracing/core/mcp.js";
 
 interface AgentToolContentPolicy {
   readonly recordInputs: boolean;
@@ -11,8 +11,7 @@ interface AgentToolContentPolicy {
 }
 
 interface AgentToolSpanContext extends AgentToolContentPolicy {
-  readonly recordError?: (error: unknown, errorType?: string) => void;
-  readonly setAttributes?: (attributes: Attributes) => void;
+  readonly mcp?: McpLifecycle;
 }
 
 const AGENT_TOOL_SPAN_CONTEXT_KEY = createContextKey("eve.agent.tool-span-context");
@@ -27,9 +26,25 @@ export function withAgentToolContentPolicy(
   policy: AgentToolContentPolicy,
 ): Context {
   const current = agentToolSpanContext(context);
+  const mcp = current?.mcp;
   return context.setValue(AGENT_TOOL_SPAN_CONTEXT_KEY, {
     ...current,
     ...policy,
+    mcp:
+      mcp === undefined
+        ? undefined
+        : {
+            update: mcp.update,
+            error(error, type) {
+              mcp.error(policy.recordOutputs ? error : undefined, type);
+            },
+            arguments(value) {
+              if (policy.recordInputs) mcp.arguments(value);
+            },
+            result(value) {
+              if (policy.recordOutputs) mcp.result(value);
+            },
+          },
   } satisfies AgentToolSpanContext);
 }
 
@@ -49,25 +64,4 @@ export function agentToolContentPolicy(
         recordInputs: spanContext.recordInputs,
         recordOutputs: spanContext.recordOutputs,
       };
-}
-
-export function annotateAgentToolSpan(
-  attributes: Attributes,
-  context: Context = otelContext.active(),
-): boolean {
-  const setAttributes = agentToolSpanContext(context)?.setAttributes;
-  if (setAttributes === undefined) return false;
-  setAttributes(attributes);
-  return true;
-}
-
-export function recordAgentToolSpanError(
-  error: unknown,
-  errorType?: string,
-  context: Context = otelContext.active(),
-): boolean {
-  const spanContext = agentToolSpanContext(context);
-  if (spanContext?.recordError === undefined) return false;
-  spanContext.recordError(spanContext.recordOutputs ? error : undefined, errorType);
-  return true;
 }

@@ -165,6 +165,9 @@ await tracing.turn(turnInfo, async (turn) => {
 
 Construction controls parentage, span names, attributes, completion, and cleanup.
 No authoring scope exposes a raw span, attribute map, checkpoint, or resume method.
+Configure every adapter through `createAgentTracing`. Consumers use callback or
+lifecycle methods for usage, protocol metadata, payloads, and errors.
+Attribute builders are private implementation details, not API entry points.
 
 
 ## Span topology and lifetime

@@ -20,7 +20,8 @@ import { normalizeChannelAudience } from "#shared/channel-audience.js";
 import { isSampledTrace } from "#tracing/sampled-trace.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
-import type { RuntimeScope, createTraceLifecycle } from "#tracing/core/scopes.js";
+import type { RuntimeScope } from "#tracing/core/scopes.js";
+import type { AgentTracing } from "#tracing/core/agent-tracing.js";
 
 interface AgentActionInstrumentation {
   readonly events: Pick<
@@ -43,7 +44,7 @@ export interface AgentActionContext {
 
 /** Builds durable `agent.action` spans around eve's runtime dispatch boundary. */
 export function createAgentActionInstrumentation(input: {
-  readonly lifecycle: ReturnType<typeof createTraceLifecycle>;
+  readonly lifecycle: AgentTracing["lifecycle"];
   readonly frameworkVersion: string;
   readonly idGenerator: AgentSpanIdGenerator;
   readonly recordInputs: boolean;

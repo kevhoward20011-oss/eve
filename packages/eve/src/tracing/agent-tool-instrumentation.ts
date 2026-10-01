@@ -1,7 +1,6 @@
 import {
   ROOT_CONTEXT,
   type Context,
-  type Attributes,
   type SpanContext,
   trace,
 } from "#compiled/@opentelemetry/api/index.js";
@@ -17,13 +16,15 @@ import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";
 import { withAgentToolSpanContext } from "#tracing/agent-tool-span-context.js";
 import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
-import type { RuntimeScope, createTraceLifecycle } from "#tracing/core/scopes.js";
+import type { RuntimeScope } from "#tracing/core/scopes.js";
+import type { AgentTracing } from "#tracing/core/agent-tracing.js";
+import type { McpUpdate } from "#tracing/core/mcp.js";
 
 interface ToolSpanState {
   readonly actionKey: string;
   readonly attemptId: string;
   context: Context;
-  readonly additionalAttributes: Attributes;
+  readonly mcpUpdates: McpUpdate[];
   readonly event: InstrumentationToolCallStartedEvent;
   readonly fallbackParent: Context;
   readonly idempotencyKey: string;
@@ -48,7 +49,7 @@ interface AgentToolInstrumentation {
 
 /** Keeps SDK tool spans parented to actions even when SDK telemetry wins the event race. */
 export function createAgentToolInstrumentation(input: {
-  readonly lifecycle: ReturnType<typeof createTraceLifecycle>;
+  readonly lifecycle: AgentTracing["lifecycle"];
   readonly actionContextFor: (
     sessionId: string,
     turnId: string,
@@ -146,7 +147,7 @@ export function createAgentToolInstrumentation(input: {
     const state: ToolSpanState = {
       actionKey,
       attemptId: event.scope.attemptId,
-      additionalAttributes: {},
+      mcpUpdates: [],
       context: withChannelAudience(
         contextFromSpanContext({
           isRemote: false,
@@ -165,13 +166,17 @@ export function createAgentToolInstrumentation(input: {
     state.context = withAgentToolSpanContext(state.context, {
       recordInputs: input.recordInputs,
       recordOutputs: input.recordOutputs,
-      setAttributes(attributes) {
-        Object.assign(state.additionalAttributes, attributes);
-        state.scope?.annotate(attributes);
-      },
-      recordError(error, errorType) {
-        state.pendingError = { error, errorType };
-        state.scope?.error(error, errorType);
+      mcp: {
+        update(update) {
+          if (state.scope !== undefined) state.scope.mcp.update(update);
+          else if (state.mcpUpdates.length < 256) state.mcpUpdates.push(update);
+        },
+        error(error, errorType) {
+          state.pendingError = { error, errorType };
+          state.scope?.mcp.error(error, errorType);
+        },
+        arguments() {},
+        result() {},
       },
     });
     getAttemptStates(event.scope.attemptId).set(event.idempotencyKey, state);
@@ -202,7 +207,7 @@ export function createAgentToolInstrumentation(input: {
       ),
       { executionContext: parent },
     );
-    state.scope.annotate(state.additionalAttributes);
+    for (const update of state.mcpUpdates) state.scope.mcp.update(update);
     if (state.pendingError !== undefined) {
       state.scope.error(state.pendingError.error, state.pendingError.errorType);
     }

@@ -15,7 +15,7 @@ import type { AgentActionContext } from "#tracing/agent-action-instrumentation.j
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { normalizeChannelAudience, type ChannelAudience } from "#shared/channel-audience.js";
 import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
-import type { createTraceLifecycle } from "#tracing/core/scopes.js";
+import type { AgentTracing } from "#tracing/core/agent-tracing.js";
 
 interface AgentApprovalSpanState {
   readonly traceSessionId: string;
@@ -35,7 +35,7 @@ interface AgentApprovalSpanState {
 
 /** Builds durable approval wait spans under their originating runtime action. */
 export function createAgentApprovalInstrumentation(input: {
-  readonly lifecycle: ReturnType<typeof createTraceLifecycle>;
+  readonly lifecycle: AgentTracing["lifecycle"];
   readonly actionContextFor: (
     sessionId: string,
     turnId: string,

@@ -22,7 +22,8 @@ import { isSampledTrace } from "#tracing/sampled-trace.js";
 import { suppressTracing } from "#tracing/suppress-tracing.js";
 import type { ConversationEnvironment } from "#shared/conversation-context.js";
 import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
-import type { RuntimeScope, createTraceLifecycle } from "#tracing/core/scopes.js";
+import type { RuntimeScope } from "#tracing/core/scopes.js";
+import type { AgentTracing } from "#tracing/core/agent-tracing.js";
 
 type SpanState = { readonly runtime: RuntimeScope; readonly context: Context };
 
@@ -38,7 +39,7 @@ interface AgentMemoryInstrumentation {
 }
 
 export function createAgentMemoryInstrumentation(input: {
-  readonly lifecycle: ReturnType<typeof createTraceLifecycle>;
+  readonly lifecycle: AgentTracing["lifecycle"];
   readonly idGenerator: import("#tracing/agent-span-id-generator.js").AgentSpanIdGenerator;
   readonly environment: ConversationEnvironment;
   readonly recordOutputs?: boolean;

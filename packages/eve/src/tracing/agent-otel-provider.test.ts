@@ -44,11 +44,7 @@ import {
 } from "#instrumentation/lifecycle.js";
 import type { ChannelAudience } from "#shared/channel-audience.js";
 import { channelAudienceFromContext } from "#tracing/channel-audience-context.js";
-import {
-  agentToolContentPolicy,
-  agentToolSpanContext,
-  annotateAgentToolSpan,
-} from "#tracing/agent-tool-span-context.js";
+import { agentToolContentPolicy, agentToolSpanContext } from "#tracing/agent-tool-span-context.js";
 import { contentFilteringProcessor } from "#tracing/content-span-processor.js";
 import { parseLocalTraceSegment } from "#tracing/local-trace-reader.js";
 import { CONTENT_ATTRIBUTE_LIMIT } from "#tracing/agent-otel-content.js";
@@ -2469,16 +2465,12 @@ describe("createAgentOtelInstrumentation", () => {
         recordInputs: false,
         recordOutputs: false,
       });
-      annotateAgentToolSpan(
-        {
-          "eve.connection.name": "linear",
-          "gen_ai.operation.name": "execute_tool",
-          "gen_ai.tool.name": "get_issue",
-          "jsonrpc.request.id": "7",
-          "mcp.method.name": "tools/call",
-        },
-        active!,
-      );
+      agentToolSpanContext(active!)?.mcp?.update({
+        connectionName: "linear",
+        method: "tools/call",
+        toolName: "get_issue",
+        requestId: "7",
+      });
     });
     withSpy.mockRestore();
 

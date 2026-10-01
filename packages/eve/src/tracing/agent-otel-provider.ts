@@ -20,7 +20,7 @@ import { createAgentToolInstrumentation } from "#tracing/agent-tool-instrumentat
 import { markAgentTraceContext } from "#tracing/agent-trace-context.js";
 import * as runtimeAttributes from "#tracing/agent-otel-runtime-context.js";
 import { createAgentMemoryInstrumentation } from "#tracing/agent-memory-instrumentation.js";
-import { readGatewayCost, readGatewayCostData } from "#tracing/agent-otel-usage.js";
+import { readGatewayCostData } from "#tracing/agent-otel-usage.js";
 import { createAgentOtelSessionContext } from "#tracing/agent-otel-session-context.js";
 import type { TraceCapturePolicy } from "#tracing/otel-declaration.js";
 import { isSampledTrace, resolveTracePolicyDecision } from "#tracing/sampled-trace.js";
@@ -136,6 +136,7 @@ export function createAgentOtelInstrumentation(
   const { prepareSessionTrace, prepareTurnTrace } = createAgentOtelSessionContext({
     ...input,
     environment,
+    lifecycle,
   });
 
   const projectEvent = async (event: InstrumentationEvent): Promise<InstrumentationEvent> => {
@@ -422,10 +423,8 @@ export function createAgentOtelInstrumentation(
     if (attempt === undefined) return;
     // Vercel AI Gateway reports per-call cost in providerMetadata.gateway;
     // attributes exist only when it was actually the gateway serving the call.
-    const costAttributes = readGatewayCost(event.providerMetadata);
-    if (costAttributes === undefined) return;
-    // The vendored OTel Span surface only has singular setAttribute.
-    attempt.runtime.cost(readGatewayCostData(event.providerMetadata) ?? {});
+    const cost = readGatewayCostData(event.providerMetadata);
+    if (cost !== undefined) attempt.runtime.cost(cost);
   };
 
   return {

@@ -54,7 +54,7 @@ describe("MCP trace propagation", () => {
     const toolContext = withAgentToolSpanContext(ROOT_CONTEXT, {
       recordInputs: false,
       recordOutputs: false,
-      setAttributes,
+      mcp: { update: setAttributes, error() {}, arguments() {}, result() {} },
     });
     const fetcher = vi.fn(
       async (_request: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
@@ -102,17 +102,14 @@ describe("MCP trace propagation", () => {
     expect(requestBody.params._meta).not.toHaveProperty("recordOutputs");
     expect(setAttributes).toHaveBeenCalledWith(
       expect.objectContaining({
-        "eve.connection.name": "linear",
-        "gen_ai.operation.name": "execute_tool",
-        "gen_ai.tool.name": "get_issue",
-        "jsonrpc.request.id": "42",
-        "mcp.method.name": "tools/call",
-        "mcp.protocol.version": "2025-11-25",
-        "network.protocol.name": "http",
-        "network.transport": "tcp",
+        connectionName: "linear",
+        toolName: "get_issue",
+        requestId: "42",
+        method: "tools/call",
+        protocolVersion: "2025-11-25",
       }),
     );
-    expect(setAttributes).toHaveBeenCalledWith({ "mcp.session.id": "session-1" });
+    expect(setAttributes).toHaveBeenCalledWith({ sessionId: "session-1" });
   });
 
   it("leaves oversized JSON-RPC requests untouched", async () => {
