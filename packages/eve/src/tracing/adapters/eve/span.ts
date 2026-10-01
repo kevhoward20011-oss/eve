@@ -1,26 +1,21 @@
-import {
-  trace,
-  SpanKind,
-  type Context,
-  type Span,
-  type Tracer,
-} from "#compiled/@opentelemetry/api/index.js";
-import { createTraceEngine } from "#tracing/core/engine.js";
+import { trace, SpanKind, type Context, type Tracer } from "#compiled/@opentelemetry/api/index.js";
+import { createTraceEngine, type TraceOperation } from "#tracing/core/engine.js";
 import { liveOtelBackend } from "#tracing/adapters/otel.js";
 import { eveOutputMapping } from "#tracing/adapters/eve/compatibility.js";
-import type { SpanType, TraceLink } from "#tracing/core/types.js";
 import { channelRequestMetadata, applyAttributes } from "#tracing/core/contract.js";
+import type { SpanType, TraceLink } from "#tracing/core/types.js";
 
 type SpanOptions = NonNullable<Parameters<Tracer["startSpan"]>[1]>;
+const engines = new WeakMap<Tracer, ReturnType<typeof createTraceEngine>>();
 
 export function annotateChannelRequest(
-  span: Span,
+  operation: TraceOperation,
   input: { channelName?: string; channelKind?: string },
 ): void {
-  applyAttributes(span, channelRequestMetadata(input));
+  applyAttributes(operation, channelRequestMetadata(input));
 }
 
-/** Keeps eve's full parent context while the shared engine creates and maps the span. */
+/** Transport operations use the same backend without exposing an OTel span. */
 export function startEveSpan(input: {
   readonly tracer: Tracer;
   readonly type: SpanType;
@@ -29,28 +24,13 @@ export function startEveSpan(input: {
   readonly options?: SpanOptions;
   readonly parent?: Context;
   readonly links?: readonly TraceLink[];
-}): Span {
-  let recorded: Span | undefined;
-  const tracer = {
-    startSpan(name: string, options?: SpanOptions) {
-      recorded = input.tracer.startSpan(
-        name,
-        {
-          ...input.options,
-          ...options,
-          startTime: input.options?.startTime,
-          links:
-            options?.links === undefined || options.links.length === 0
-              ? input.options?.links
-              : options.links,
-        },
-        input.parent,
-      );
-      return recorded;
-    },
-  } as Tracer;
-  const engine = createTraceEngine({ backend: liveOtelBackend(tracer, eveOutputMapping()) });
-  const operation = engine.start(
+}): TraceOperation {
+  let engine = engines.get(input.tracer);
+  if (engine === undefined) {
+    engine = createTraceEngine({ backend: liveOtelBackend(input.tracer, eveOutputMapping()) });
+    engines.set(input.tracer, engine);
+  }
+  return engine.start(
     {
       type: input.type,
       operationId: input.operationId,
@@ -58,31 +38,20 @@ export function startEveSpan(input: {
       kind:
         input.options?.kind === undefined
           ? undefined
-          : input.options.kind === SpanKind.SERVER
-            ? "SERVER"
-            : input.options.kind === SpanKind.CLIENT
-              ? "CLIENT"
-              : "INTERNAL",
-      root: input.options?.root,
+          : (SpanKind[input.options.kind] as
+              | "INTERNAL"
+              | "SERVER"
+              | "CLIENT"
+              | "PRODUCER"
+              | "CONSUMER"),
       attributes: input.options?.attributes ?? {},
+      root: input.options?.root,
+      parent: input.parent === undefined ? undefined : trace.getSpan(input.parent)?.spanContext(),
       links: input.links,
       startTimeMs:
         typeof input.options?.startTime === "number" ? input.options.startTime : undefined,
     },
-    // The lifecycle bus has already applied eve's audience and directional ceiling.
     { emit: true, recordInputs: true, recordOutputs: true },
+    input.parent,
   );
-  const span = recorded ?? trace.wrapSpanContext(operation.reference);
-  return new Proxy(span, {
-    get(target, key) {
-      if (key === "setAttribute")
-        return (name: string, value: Parameters<Span["setAttribute"]>[1]) => {
-          operation.setAttribute(name, value);
-          return target;
-        };
-      if (key === "end") return (time?: number) => operation.end(time);
-      const value = Reflect.get(target, key, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
 }

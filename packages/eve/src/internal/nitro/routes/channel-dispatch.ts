@@ -60,7 +60,7 @@ export async function dispatchChannelRequest(
     // Correlation does not require an eve-owned request span. Preserve any
     // active platform request or function span before route resolution.
     const requestTraceContext =
-      span?.spanContext() ?? otelTrace.getSpan(otelContext.active())?.spanContext();
+      span?.reference ?? otelTrace.getSpan(otelContext.active())?.spanContext();
     const bundle = await resolveNitroChannelRuntimeBundle(config);
 
     const matchedChannel = bundle.channels.find(

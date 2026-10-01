@@ -21,7 +21,7 @@ import { markAgentTraceContext } from "#tracing/agent-trace-context.js";
 import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import * as runtimeAttributes from "#tracing/agent-otel-runtime-context.js";
 import { createAgentMemoryInstrumentation } from "#tracing/agent-memory-instrumentation.js";
-import { readGatewayCost, setAgentUsage } from "#tracing/agent-otel-usage.js";
+import { readGatewayCost, readGatewayCostData } from "#tracing/agent-otel-usage.js";
 import { createAgentOtelSessionContext } from "#tracing/agent-otel-session-context.js";
 import type { TraceCapturePolicy } from "#tracing/otel-declaration.js";
 import { isSampledTrace, resolveTracePolicyDecision } from "#tracing/sampled-trace.js";
@@ -126,7 +126,7 @@ export function createAgentOtelInstrumentation(
       const step = steps.get(scope);
       return step === undefined
         ? undefined
-        : { context: step.context, spanContext: step.span.spanContext() };
+        : { context: step.context, spanContext: step.runtime.reference };
     },
     tracer: input.tracer,
   });
@@ -240,8 +240,7 @@ export function createAgentOtelInstrumentation(
           ? undefined
           : [{ relationship: "execution.delivery", context: activeSpanContext }],
     });
-    const stepSpan = bound.span;
-    const stepContext = trace.setSpan(turnContext, stepSpan);
+    const stepContext = trace.setSpan(turnContext, trace.wrapSpanContext(bound.runtime.reference));
     steps.set(event.scope, { ...bound, context: stepContext });
     attemptScopes.set(event.scope.attemptId, event.scope);
   };
@@ -377,7 +376,10 @@ export function createAgentOtelInstrumentation(
         },
       },
     });
-    const state = { ...bound, context: trace.setSpan(attempt.context, bound.span) };
+    const state = {
+      ...bound,
+      context: trace.setSpan(attempt.context, trace.wrapSpanContext(bound.runtime.reference)),
+    };
     getExecutionContexts(event.scope).set(event.idempotencyKey, state.context);
     getSpanStates(modelSpans, event.scope).set(event.idempotencyKey, state);
   };
@@ -396,7 +398,7 @@ export function createAgentOtelInstrumentation(
         model: { ...event, content: recordOutputs ? event.content : undefined },
       });
       const attempt = steps.get(event.scope);
-      if (attempt !== undefined) setAgentUsage(attempt.span, event.usage);
+      if (attempt !== undefined) await attempt.runtime.usage(event.usage);
     }
   };
 
@@ -438,9 +440,7 @@ export function createAgentOtelInstrumentation(
     const costAttributes = readGatewayCost(event.providerMetadata);
     if (costAttributes === undefined) return;
     // The vendored OTel Span surface only has singular setAttribute.
-    for (const [key, value] of Object.entries(costAttributes)) {
-      attempt.span.setAttribute(key, value);
-    }
+    attempt.runtime.cost(readGatewayCostData(event.providerMetadata) ?? {});
   };
 
   return {

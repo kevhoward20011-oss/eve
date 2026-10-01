@@ -6,12 +6,11 @@ import {
   trace,
   type Attributes,
   type Context,
-  type Span,
   type TextMapSetter,
 } from "#compiled/@opentelemetry/api/index.js";
 
 import { contentAttribute } from "#tracing/agent-otel-content.js";
-import { recordAgentSpanError } from "#tracing/agent-span-error.js";
+import type { TraceOperation } from "#tracing/core/engine.js";
 import {
   agentToolContentPolicy,
   agentToolSpanContext,
@@ -143,9 +142,9 @@ export async function withMcpToolsListSpan<T>(input: {
     parent,
   });
   const spanContext = withMcpMethodName(
-    withAgentToolSpanContext(trace.setSpan(parent, span), {
+    withAgentToolSpanContext(trace.setSpan(parent, trace.wrapSpanContext(span.reference)), {
       ...agentToolContentPolicy(parent),
-      recordError: (error, errorType) => recordAgentSpanError(span, error, errorType),
+      recordError: (error, errorType) => span.fail(error, errorType),
       setAttributes: (spanAttributes) => setSpanAttributes(span, spanAttributes),
     }),
     "tools/list",
@@ -195,9 +194,9 @@ export async function withMcpToolCallSpan<T>(input: {
     parent,
   });
   const spanContext = withMcpMethodName(
-    withAgentToolSpanContext(trace.setSpan(parent, span), {
+    withAgentToolSpanContext(trace.setSpan(parent, trace.wrapSpanContext(span.reference)), {
       ...policy,
-      recordError: (error, errorType) => recordAgentSpanError(span, error, errorType),
+      recordError: (error, errorType) => span.fail(error, errorType),
       setAttributes: (attributes) => setSpanAttributes(span, attributes),
     }),
     "tools/call",
@@ -218,7 +217,7 @@ function runMcpToolCall<T>(
     readonly execute: () => Promise<T>;
   },
   context: Context,
-  fallbackSpan: Span | undefined,
+  fallbackSpan: TraceOperation | undefined,
   policy: ReturnType<typeof agentToolContentPolicy>,
 ): Promise<T> {
   if (fallbackSpan !== undefined && policy.recordInputs) {
@@ -375,7 +374,7 @@ function errorType(error: unknown, code: string | undefined): string | undefined
   return error instanceof Error ? error.name || "Error" : undefined;
 }
 
-function setSpanAttributes(span: Span, attributes: Attributes): void {
+function setSpanAttributes(span: TraceOperation, attributes: Attributes): void {
   for (const [name, value] of Object.entries(attributes)) {
     if (value !== undefined) span.setAttribute(name, value);
   }

@@ -47,12 +47,7 @@ export function inspectTrace(runId: string) {
       ? undefined
       : owned.find((span) => span.name.startsWith("chat ") && span.parentSpanId === step.spanId);
   return {
-    topology:
-      tool !== undefined &&
-      step !== undefined &&
-      model !== undefined &&
-      typeof tool.parentSpanId === "string" &&
-      tool.parentSpanId !== step.spanId,
+    modelStep: tool !== undefined && step !== undefined && model !== undefined,
     identity:
       tool !== undefined &&
       [tool, step, model].every(

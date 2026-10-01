@@ -2,9 +2,7 @@ import {
   type Attributes,
   context,
   propagation,
-  type Span,
   SpanKind,
-  SpanStatusCode,
   type TextMapGetter,
   trace,
 } from "#compiled/@opentelemetry/api/index.js";
@@ -18,6 +16,7 @@ import {
   requestStatusAttributes,
   applyAttributes,
 } from "#tracing/core/contract.js";
+import type { TraceOperation } from "#tracing/core/engine.js";
 
 /**
  * Stable tracer name for every inbound eve channel HTTP request. Kept
@@ -72,7 +71,7 @@ interface TraceChannelRequestInput {
  */
 export async function traceChannelRequest<T extends Response>(
   input: TraceChannelRequestInput,
-  handler: (span: Span | undefined) => Promise<T>,
+  handler: (span: TraceOperation | undefined) => Promise<T>,
 ): Promise<T> {
   if (getInstrumentationRuntime()?.otelSettings?.traceChannelRequests !== true) {
     return await handler(undefined);
@@ -95,18 +94,18 @@ export async function traceChannelRequest<T extends Response>(
     parent: parentContext,
   });
   const activeContext = markAgentTraceContext(
-    withErrorContent(trace.setSpan(parentContext, span), false),
+    withErrorContent(trace.setSpan(parentContext, trace.wrapSpanContext(span.reference)), false),
   );
 
   try {
     const response = await context.with(activeContext, () => handler(span));
     applyAttributes(span, requestStatusAttributes(response.status));
     if (response.status >= 500) {
-      span.setStatus({ code: SpanStatusCode.ERROR });
+      span.setStatus("ERROR");
     }
     return response;
   } catch (error) {
-    span.setStatus({ code: SpanStatusCode.ERROR });
+    span.setStatus("ERROR");
     throw error;
   } finally {
     span.end();

@@ -31,23 +31,27 @@ export function setAgentInvocationUsage(
 export function readGatewayCost(
   providerMetadata: Readonly<Record<string, unknown>>,
 ): Record<string, string | number> | undefined {
-  const gateway = providerMetadata.gateway;
-  if (!isRecord(gateway)) return undefined;
+  const data = readGatewayCostData(providerMetadata);
+  if (data === undefined) return undefined;
   const attributes = Object.fromEntries(
-    Object.entries(
-      gatewayCostAttributes({
-        cost: readUsd(gateway.cost),
-        gatewayCost: readUsd(gateway.gatewayCost),
-        inputCost: readUsd(gateway.inputInferenceCost),
-        outputCost: readUsd(gateway.outputInferenceCost),
-        generationId:
-          typeof gateway.generationId === "string" && gateway.generationId.length > 0
-            ? gateway.generationId
-            : undefined,
-      }),
-    ).filter(([, value]) => value !== undefined),
+    Object.entries(gatewayCostAttributes(data)).filter(([, value]) => value !== undefined),
   ) as Record<string, string | number>;
   return Object.keys(attributes).length === 0 ? undefined : attributes;
+}
+
+export function readGatewayCostData(providerMetadata: Readonly<Record<string, unknown>>) {
+  const gateway = providerMetadata.gateway;
+  if (!isRecord(gateway)) return undefined;
+  return {
+    cost: readUsd(gateway.cost),
+    gatewayCost: readUsd(gateway.gatewayCost),
+    inputCost: readUsd(gateway.inputInferenceCost),
+    outputCost: readUsd(gateway.outputInferenceCost),
+    generationId:
+      typeof gateway.generationId === "string" && gateway.generationId.length > 0
+        ? gateway.generationId
+        : undefined,
+  };
 }
 
 function readUsd(value: unknown): number | undefined {

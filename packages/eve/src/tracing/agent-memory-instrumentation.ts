@@ -96,9 +96,8 @@ export function createAgentMemoryInstrumentation(input: {
         },
       },
     });
-    const span = bound.span;
     spans.set(event.idempotencyKey, {
-      context: trace.setSpan(parent, span),
+      context: trace.setSpan(parent, trace.wrapSpanContext(bound.runtime.reference)),
       ...bound,
     });
   };

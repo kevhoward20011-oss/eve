@@ -2,7 +2,6 @@ import {
   ROOT_CONTEXT,
   type Context,
   type Attributes,
-  type Span,
   type SpanContext,
   type Tracer,
   trace,
@@ -18,7 +17,6 @@ import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";
-import { recordAgentSpanError as recordError } from "#tracing/agent-span-error.js";
 import { withAgentToolSpanContext } from "#tracing/agent-tool-span-context.js";
 import { bindEveTraceScope, type EveTraceScope } from "#tracing/adapters/eve/scopes.js";
 
@@ -33,7 +31,6 @@ interface ToolSpanState {
   readonly spanId: string;
   readonly startTimeMs: number;
   finished?: true;
-  span?: Span;
   scope?: EveTraceScope;
   terminal?: InstrumentationToolCallTerminalEvent;
   pendingError?: { readonly error: unknown; readonly errorType?: string };
@@ -89,7 +86,7 @@ export function createAgentToolInstrumentation(input: {
     if (state === undefined) return;
     state.terminal = event;
 
-    if (state.span === undefined) {
+    if (state.scope === undefined) {
       const actionParent = await input.actionContextFor(
         state.event.scope.sessionId,
         state.event.scope.turnId,
@@ -103,7 +100,7 @@ export function createAgentToolInstrumentation(input: {
   return {
     async actionStarted(event) {
       const state = byAction.get(event.idempotencyKey);
-      if (state === undefined || state.span !== undefined || state.finished === true) return;
+      if (state === undefined || state.scope !== undefined || state.finished === true) return;
       const actionParent = await input.actionContextFor(
         event.scope.sessionId,
         event.scope.turnId,
@@ -120,7 +117,7 @@ export function createAgentToolInstrumentation(input: {
       if (states === undefined) return;
       for (const state of states.values()) {
         if (state.finished === true) continue;
-        if (state.span === undefined) await startSpan(state, state.fallbackParent);
+        if (state.scope === undefined) await startSpan(state, state.fallbackParent);
         await finish(state, failure);
       }
       byAttempt.delete(attemptId);
@@ -171,14 +168,11 @@ export function createAgentToolInstrumentation(input: {
       recordOutputs: input.recordOutputs,
       setAttributes(attributes) {
         Object.assign(state.additionalAttributes, attributes);
-        if (state.span === undefined) return;
-        for (const [name, value] of Object.entries(attributes)) {
-          if (value !== undefined) state.span.setAttribute(name, value);
-        }
+        state.scope?.runtime.annotate(attributes);
       },
       recordError(error, errorType) {
         state.pendingError = { error, errorType };
-        if (state.span !== undefined) recordError(state.span, error, errorType);
+        state.scope?.runtime.error(error, errorType);
       },
     });
     getAttemptStates(event.scope.attemptId).set(event.idempotencyKey, state);
@@ -187,7 +181,7 @@ export function createAgentToolInstrumentation(input: {
   }
 
   async function startSpan(state: ToolSpanState, parent: Context): Promise<void> {
-    if (state.span !== undefined || state.finished === true) return;
+    if (state.scope !== undefined || state.finished === true) return;
     state.scope = await bindEveTraceScope({
       tracer: input.tracer,
       idGenerator: input.idGenerator,
@@ -212,16 +206,14 @@ export function createAgentToolInstrumentation(input: {
         },
       },
     });
-    state.span = state.scope.span;
-    for (const [name, value] of Object.entries(state.additionalAttributes))
-      if (value !== undefined) state.span.setAttribute(name, value);
+    state.scope.runtime.annotate(state.additionalAttributes);
     if (state.pendingError !== undefined) {
       state.scope.runtime.error(state.pendingError.error, state.pendingError.errorType);
     }
   }
 
   async function finishIfReady(state: ToolSpanState): Promise<void> {
-    if (state.span === undefined || state.terminal === undefined) return;
+    if (state.scope === undefined || state.terminal === undefined) return;
     await finish(state);
   }
 
@@ -229,8 +221,7 @@ export function createAgentToolInstrumentation(input: {
     state: ToolSpanState,
     failure?: { readonly error: unknown },
   ): Promise<void> {
-    const span = state.span;
-    if (span === undefined || state.finished === true) return;
+    if (state.scope === undefined || state.finished === true) return;
     state.finished = true;
     const terminal = state.terminal;
     const failed =

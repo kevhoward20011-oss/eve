@@ -475,7 +475,7 @@ output mapping and authorization.
 
 ## eve adoption and durable state
 
-Configure persistence once through a runtime-owned `ScopePersistence` adapter.
+Configure `checkpointer` once through a runtime-owned `TraceCheckpointer` adapter.
 The adapter loads, saves, and removes serializable records in the existing
 workflow checkpoint. The library does not create a separate checkpoint.
 
@@ -484,6 +484,11 @@ restores or creates the corresponding record. The record retains ancestry,
 reserved identity, start time, capture permission, and semantic operation data.
 Only the application runtime controls suspension, replay, and retry.
 Tracing must never invoke earlier application callbacks during restoration.
+
+Lifecycle is the lower-level API. The callback DSL uses lifecycle construction,
+`started()`, `completed()`, and `failed()` internally. SDK hooks and eve events
+use that same implementation. The backend accepts opaque host context explicitly;
+no adapter captures a raw span or wraps it with `Proxy`.
 
 eve can project its existing durable records into runtime scope bindings.
 Do not add a second persistence owner or expose those bindings to tool authors.

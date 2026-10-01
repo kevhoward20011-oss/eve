@@ -26,7 +26,6 @@ export function agentTraceIdentityAttributes(input: {
     identityAttributes({
       conversationId,
       runId: input.sessionId,
-      turnId: "",
     }),
   ) as Record<string, string | number>;
 }
