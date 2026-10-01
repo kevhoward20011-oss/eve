@@ -29,6 +29,14 @@ async function askWhichDay(conversation: ChannelConversation) {
   return options;
 }
 
+function expectAnsweredSaturday(output: unknown) {
+  // The message carries the real output so a broken cell's symptom can match it.
+  expect(output, `ask_question returned ${JSON.stringify(output)}`).toEqual({
+    answer: "Saturday",
+    status: "answered",
+  });
+}
+
 export const hitlContract = [
   {
     rule: "pressing a rendered option answers the pending question with that option",
@@ -37,10 +45,7 @@ export const hitlContract = [
     async run(conversation) {
       const [saturday] = await askWhichDay(conversation);
       await conversation.press(saturday!);
-      expect(await conversation.waitForToolResult("ask_question")).toEqual({
-        answer: "Saturday",
-        status: "answered",
-      });
+      expectAnsweredSaturday(await conversation.waitForToolResult("ask_question"));
     },
   },
   {
@@ -50,10 +55,7 @@ export const hitlContract = [
     async run(conversation) {
       await askWhichDay(conversation);
       await conversation.say("Saturday");
-      expect(await conversation.waitForToolResult("ask_question")).toEqual({
-        answer: "Saturday",
-        status: "answered",
-      });
+      expectAnsweredSaturday(await conversation.waitForToolResult("ask_question"));
     },
   },
 ] as const satisfies readonly ContractRule[];

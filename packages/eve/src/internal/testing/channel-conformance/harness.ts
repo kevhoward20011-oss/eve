@@ -201,10 +201,10 @@ function findRoute(channel: CompiledChannel, request: Request) {
   return route;
 }
 
-function unsupported(name: string): never {
-  return (() => {
+function unsupported(name: string): () => never {
+  return () => {
     throw new Error(`The HITL conformance harness does not provide ctx.${name}.`);
-  }) as never;
+  };
 }
 
 /**
