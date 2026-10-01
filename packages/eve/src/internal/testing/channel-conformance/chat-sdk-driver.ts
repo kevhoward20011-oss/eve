@@ -29,10 +29,11 @@ type Inbound =
   | { readonly kind: "action"; readonly actionId: string; readonly value?: string };
 
 /**
- * Drives `chatSdkChannel` the way `linqChannel` and `photonIMessageChannel` wire
- * it: one direct-message adapter, no streaming, and every message handed to eve
- * with an empty `context`. The fake adapter is the platform: it reads inbound
- * JSON and records every post and edit.
+ * Drives `chatSdkChannel` with a card-capable direct-message adapter: one
+ * thread, no streaming, and every message handed to eve with an empty
+ * `context`. The fake adapter is the platform: it reads inbound JSON and
+ * records every post and edit. Text-only adapters such as Linq and Photon
+ * flatten cards, so they need their own drivers.
  */
 export function chatSdkDriver(): ChannelDriver {
   nextThread += 1;
