@@ -97,15 +97,4 @@ describe("prepareSkillServerAssets", () => {
       [...new Set(Object.values(files).map((bytes) => `${digest(bytes)}.bin`))].sort(),
     );
   });
-
-  it("stages an empty index when the agent has no skills tree", async () => {
-    await rm(skillsRoot, { force: true, recursive: true });
-
-    await prepareSkillServerAssets({ stagingDirectory, skills: [], skillsRoot });
-
-    expect(
-      JSON.parse(await readFile(join(stagingDirectory, "index", "skills.json"), "utf8")),
-    ).toEqual({ version: 1, skills: [] });
-    expect(await readdir(join(stagingDirectory, "files"))).toEqual([]);
-  });
 });

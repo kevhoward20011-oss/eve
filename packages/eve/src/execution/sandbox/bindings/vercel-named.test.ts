@@ -139,73 +139,35 @@ describe("Vercel named sandbox sessions", () => {
     ]);
   });
 
-  it("re-reads before a conditional delete and keeps a sandbox used or resumed since", async () => {
-    const recent = Object.assign(mockSandbox(address.name, "stopped"), {
-      statusUpdatedAt: new Date(500),
-      updatedAt: new Date(100),
-    });
-    const resumed = Object.assign(mockSandbox(address.name, "running"), {
-      updatedAt: new Date(10),
-    });
-    const idle = Object.assign(mockSandbox(address.name, "stopped"), {
+  // `first` is the early-out lookup; `final` is the re-read right before the delete request.
+  const idle = (status = "stopped") =>
+    Object.assign(mockSandbox(address.name, status), {
       delete: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
       updatedAt: new Date(10),
     });
+  const usedSince = () =>
+    Object.assign(idle(), { statusUpdatedAt: new Date(500), updatedAt: new Date(100) });
+
+  it.each([
+    ["keeps a sandbox used since the cutoff", usedSince, idle, [], false],
+    ["keeps a running sandbox", () => idle("running"), idle, [], false],
+    ["keeps a sandbox a call holds", idle, idle, [true], false],
+    ["keeps a sandbox resumed before the final lookup", idle, () => idle("running"), [], false],
+    ["keeps a sandbox leased before the final lookup", idle, idle, [false, true], false],
+    ["deletes a sandbox idle at both lookups", idle, idle, [false, false], true],
+  ] as const)("conditional delete %s", async (_label, first, final, leases, deleted) => {
+    const sandboxes = [first(), final()];
     const Sandbox = {
-      get: vi
-        .fn()
-        .mockResolvedValueOnce(recent)
-        .mockResolvedValueOnce(resumed)
-        .mockResolvedValue(idle),
+      get: vi.fn().mockResolvedValueOnce(sandboxes[0]).mockResolvedValueOnce(sandboxes[1]),
     };
     const { context, named } = setup({ Sandbox });
+    const answers = [...leases];
+    const inUse = leases.length === 0 ? undefined : () => answers.shift() ?? false;
 
-    expect(await named.delete(context, address, { idleBefore: 200 })).toBe(false);
-    expect(await named.delete(context, address, { idleBefore: 200 })).toBe(false);
-    expect(await named.delete(context, address, { idleBefore: 200, inUse: () => true })).toBe(
-      false,
-    );
-    expect(idle.delete).not.toHaveBeenCalled();
-    expect(await named.delete(context, address, { idleBefore: 200 })).toBe(true);
-    expect(idle.delete).toHaveBeenCalled();
-  });
-
-  it("re-checks at the final lookup, after the first check, before the delete request", async () => {
-    const idle = () =>
-      Object.assign(mockSandbox(address.name, "stopped"), {
-        delete: vi.fn(async () => undefined),
-        stop: vi.fn(async () => undefined),
-        updatedAt: new Date(10),
-      });
-    // Passes the first check, then a call resumes it before the final lookup.
-    const first = idle();
-    const resumed = Object.assign(idle(), { status: "running" });
-    // Passes the first check, then a call takes its lease before the final lookup.
-    const second = idle();
-    const finalIdle = idle();
-    const Sandbox = {
-      get: vi
-        .fn()
-        .mockResolvedValueOnce(first)
-        .mockResolvedValueOnce(resumed)
-        .mockResolvedValueOnce(second)
-        .mockResolvedValueOnce(finalIdle),
-    };
-    const { context, named } = setup({ Sandbox });
-
-    expect(await named.delete(context, address, { idleBefore: 200 })).toBe(false);
-    let leased = false;
-    const inUse = vi.fn(() => {
-      const answer = leased;
-      leased = true;
-      return answer;
-    });
-    expect(await named.delete(context, address, { idleBefore: 200, inUse })).toBe(false);
-
-    expect(inUse).toHaveBeenCalledTimes(2);
-    for (const sandbox of [first, resumed, second, finalIdle]) {
-      expect(sandbox.delete).not.toHaveBeenCalled();
-      expect(sandbox.stop).not.toHaveBeenCalled();
-    }
+    expect(await named.delete(context, address, { idleBefore: 200, inUse })).toBe(deleted);
+    expect(sandboxes[0]!.delete).not.toHaveBeenCalled();
+    expect(sandboxes[1]!.delete).toHaveBeenCalledTimes(deleted ? 1 : 0);
+    for (const sandbox of sandboxes) expect(sandbox.stop).not.toHaveBeenCalled();
   });
 });

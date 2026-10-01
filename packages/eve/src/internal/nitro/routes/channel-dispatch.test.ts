@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import type { H3Event } from "nitro";
 import {
   context as apiContext,
@@ -39,21 +37,9 @@ import {
   dispatchChannelWebSocketRequest,
 } from "#internal/nitro/routes/channel-dispatch.js";
 import { resolveNitroChannelRuntimeBundle } from "#internal/nitro/routes/runtime-stack.js";
-import { compileFromMemory } from "#internal/testing/compile-from-memory.js";
-import { withBundledCompiledArtifacts } from "#runtime/loaders/bundled-artifacts.js";
 
 vi.mock("#internal/nitro/routes/runtime-stack.js", () => ({
   resolveNitroChannelRuntimeBundle: vi.fn(),
-}));
-
-// Production builds serve skill files through Nitro server assets; this
-// stands in for `useStorage("assets:<base>")` with the index and bytes that
-// `eve build` would register.
-const serverAssetItems = new Map<string, unknown>();
-vi.mock("nitro/storage", () => ({
-  useStorage: (base: string) => ({
-    getItemRaw: async (key: string) => serverAssetItems.get(`${base}:${key}`) ?? null,
-  }),
 }));
 
 vi.mock("#internal/vercel/project-link.js", () => ({
@@ -189,74 +175,6 @@ describe("dispatchChannelRequest", () => {
       { environment: "development", projectId: "prj_first" },
       { environment: "development", projectId: "prj_second" },
     ]);
-  });
-
-  it("hands route handlers describe() and readSkill() for bundled artifacts", async () => {
-    const compiled = await compileFromMemory({
-      model: "openai/gpt-5.4",
-      name: "wired-agent",
-      skills: [{ description: "Research skill.", name: "research" }],
-    });
-    // Materialization strips skill files from the manifest; production builds
-    // ship them as Nitro server assets.
-    const manifest = {
-      ...compiled.manifest,
-      skills: compiled.manifest.skills.map(({ files: _files, ...skill }) => skill),
-    };
-    const moduleMap = compiled.moduleMap;
-    mockedResolveNitroChannelRuntimeBundle.mockResolvedValue({
-      agentName: "wired-agent",
-      channels: [
-        {
-          handler: async (_request, args) => {
-            const description = await args.describe();
-            return Response.json({
-              name: description.name,
-              skill: await args.readSkill("research"),
-              skills: description.skills,
-              tools: description.tools.length,
-            });
-          },
-          fetch: async () => new Response("unused"),
-          adapter: { kind: "channel:mcp" },
-          logicalPath: "agent/channels/mcp.ts",
-          method: "GET",
-          name: "mcp",
-          sourceId: "channel-mcp",
-          sourceKind: "module",
-          urlPath: "/mcp",
-        } satisfies ResolvedChannelDefinition,
-      ],
-      runtime,
-    });
-
-    const skillMarkdown = "---\nname: research\ndescription: Research skill.\n---\n";
-    const skillBytes = new TextEncoder().encode(skillMarkdown);
-    const skillDigest = createHash("sha256").update(skillBytes).digest("hex");
-    serverAssetItems.set(
-      "assets:eve-skill-index:skills.json",
-      JSON.stringify({
-        version: 1,
-        skills: [
-          ["research", [["SKILL.md", skillBytes.byteLength, `${skillDigest}.bin`, skillDigest]]],
-        ],
-      }),
-    );
-    // `eve build` stages files as `<sha256>.bin`, which Nitro inlines as bytes.
-    serverAssetItems.set(`assets:eve-skills:${skillDigest}.bin`, skillBytes);
-    const response = await withBundledCompiledArtifacts({ manifest, moduleMap }, () =>
-      dispatchChannelRequest(createEvent({ url: "https://eve.test/mcp" }), "GET /mcp", {
-        kind: "production",
-        sandboxScope: "test",
-      }),
-    ).finally(() => serverAssetItems.clear());
-
-    await expect(response.json()).resolves.toEqual({
-      name: "wired-agent",
-      skill: skillMarkdown,
-      skills: [{ description: "Research skill.", files: ["SKILL.md"], name: "research" }],
-      tools: expect.any(Number),
-    });
   });
 
   it("returns the response before background work settles when Nitro provides waitUntil", async () => {

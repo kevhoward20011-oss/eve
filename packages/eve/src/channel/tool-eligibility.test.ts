@@ -6,33 +6,6 @@ import { compileFromMemory } from "#internal/testing/compile-from-memory.js";
 import type { CompiledToolBehavior } from "#tools/behavior.js";
 
 describe("isInvocableCompiledTool over a compiled registry", () => {
-  it("excludes framework tools and keeps application tools", async () => {
-    const { manifest } = await compileFromMemory({
-      model: "openai/gpt-5.4",
-      tools: [{ name: "lookup" }, { execute: async () => "ok", name: "weather" }],
-    });
-    const invocable = Object.fromEntries(
-      manifest.tools.map((tool) => [tool.name, isInvocableCompiledTool(manifest, tool)]),
-    );
-
-    expect(invocable).toMatchObject({
-      agent: false,
-      bash: false,
-      load_skill: false,
-      lookup: true,
-      read_file: false,
-      weather: true,
-      web_fetch: false,
-      web_search: false,
-      write_file: false,
-    });
-    for (const tool of manifest.tools) {
-      if (compiledToolOwner(manifest, tool).kind === "framework") {
-        expect(invocable[tool.name], tool.name).toBe(false);
-      }
-    }
-  });
-
   it("keeps an application tool that overrides a framework tool name", async () => {
     const { manifest } = await compileFromMemory({
       model: "openai/gpt-5.4",

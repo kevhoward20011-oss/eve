@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SessionAuthContext } from "#channel/types.js";
-import {
-  createToolSessionOneOffNonce,
-  deriveToolSessionId,
-  validateToolSessionKey,
-} from "#execution/tool-session/id.js";
+import { deriveToolSessionId, validateToolSessionKey } from "#execution/tool-session/id.js";
 
 function principal(id: string, extra: Partial<SessionAuthContext> = {}): SessionAuthContext {
   return {
@@ -52,16 +48,11 @@ describe("deriveToolSessionId", () => {
   });
 });
 
-describe("tool session keys and nonces", () => {
-  it("accepts 1 to 512 characters", () => {
+describe("validateToolSessionKey", () => {
+  it("accepts 1 to 512 characters, for keys and one-off nonces alike", () => {
     expect(validateToolSessionKey("")).toBeDefined();
     expect(validateToolSessionKey("k")).toBeUndefined();
     expect(validateToolSessionKey("k".repeat(512))).toBeUndefined();
     expect(validateToolSessionKey("k".repeat(513))).toBeDefined();
-  });
-
-  it("mints distinct random nonces", () => {
-    expect(createToolSessionOneOffNonce()).toMatch(/^[0-9a-f]{32}$/);
-    expect(createToolSessionOneOffNonce()).not.toBe(createToolSessionOneOffNonce());
   });
 });

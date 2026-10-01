@@ -86,16 +86,6 @@ describe("describeCompiledAgent", () => {
       outputSchema: { type: "string" },
     });
     expect(byName.get("lookup")).toMatchObject({ approval: false });
-    for (const name of [
-      "agent",
-      "bash",
-      "load_skill",
-      "read_file",
-      "web_fetch",
-      "web_search",
-      "write_file",
-    ]) {
-      expect(byName.get(name)).toMatchObject({ invocable: false });
-    }
+    expect(byName.get("bash")).toMatchObject({ invocable: false });
   });
 });

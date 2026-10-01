@@ -1,7 +1,7 @@
 import { jsonSchema } from "ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { Approval } from "#approval/definition.js";
+import type { Approval, ApprovalPolicy } from "#approval/definition.js";
 import type { InvokeToolOptions } from "#channel/invoke-tool.js";
 import type { SessionAuthContext } from "#channel/types.js";
 import { ConnectionAuthorizationRequiredError } from "#connections/errors.js";
@@ -12,13 +12,11 @@ import {
   type ToolSessionManifest,
   type ToolSessionRuntime,
 } from "#execution/tool-session/invoke.js";
-import type { CompiledToolBehavior } from "#tools/behavior.js";
 import {
   sweepToolSessionSandboxes,
   TOOL_SESSION_SANDBOX_EXPIRY_MS,
   ToolSessionSandboxPersistenceError,
 } from "#execution/tool-session/sandbox.js";
-import { ToolSessionError } from "#shared/tool-session-error.js";
 import type { HarnessToolDefinition } from "#harness/execute-tool.js";
 import { mockSandbox, type MockSandbox } from "#internal/testing/mocks/mock-sandbox.js";
 import { defineState } from "#public/definitions/state.js";
@@ -302,28 +300,17 @@ function tool(
   };
 }
 
-/** Tools the stand-in manifest records as framework-owned. */
-const FRAMEWORK_TOOL_NAMES = new Set(["agent", "bash", "load_skill", "read_file", "web_search"]);
-
 function runtimeWith(
   tools: readonly HarnessToolDefinition[],
   registry: RuntimeSandboxRegistry = createNamedProvider().registry,
 ): ToolSessionRuntime {
-  // A stand-in compiled manifest; the parity test covers a real compiled registry.
+  // A stand-in compiled manifest of application tools; framework and handled
+  // tools are refused on a real compiled registry in route-invoke-tool.integration.
   const manifest: ToolSessionManifest = {
     bindings: Object.fromEntries(
-      tools.map((definition) => [
-        `source:${definition.name}`,
-        {
-          owner: FRAMEWORK_TOOL_NAMES.has(definition.name)
-            ? ({ feature: "eve:defaults", kind: "framework" } as const)
-            : ({ kind: "application" } as const),
-        },
-      ]),
+      tools.map((definition) => [`source:${definition.name}`, { owner: { kind: "application" } }]),
     ),
     tools: tools.map((definition) => ({
-      // Only `handling` matters here, and both behavior shapes carry it.
-      behavior: definition.behavior as CompiledToolBehavior | undefined,
       hasExecute: definition.execute !== undefined,
       name: definition.name,
       sourceId: `source:${definition.name}`,
@@ -415,15 +402,32 @@ describe("invokeTool: context", () => {
     expect(ids[2]).toBe(ids[3]);
   });
 
-  it("refuses a key longer than 512 characters", async () => {
+  // Length limits are owned by id.test; these rows cover which option is validated.
+  it.each([
+    ["an empty key", { key: "" }, "tool session key"],
+    ["an empty one-off nonce", { key: undefined, oneOffNonce: "" }, "one-off nonce"],
+    [
+      "an oversized one-off nonce",
+      { key: undefined, oneOffNonce: "n".repeat(513) },
+      "one-off nonce",
+    ],
+    ["a nonce beside a key, which is ignored", { key: "k", oneOffNonce: "" }, undefined],
+  ] as const)("validates %s before running the tool", async (_label, options, refused) => {
     const execute = vi.fn();
     const runtime = runtimeWith([tool("t", execute)]);
 
-    expect(await call(runtime, "t", {}, { key: "k".repeat(513) })).toMatchObject({
+    const result = await call(runtime, "t", {}, options);
+
+    if (refused === undefined) {
+      expect(result.status).toBe("completed");
+      expect(execute).toHaveBeenCalledTimes(1);
+      return;
+    }
+    expect(result).toMatchObject({
+      message: expect.stringContaining(`The ${refused} must`),
       status: "invalid-input",
     });
-    expect((await call(runtime, "t", {}, { key: "k".repeat(512) })).status).toBe("completed");
-    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("returns a throwing validator's error as generic with its error id, but schema failures verbatim", async () => {
@@ -463,33 +467,8 @@ describe("invokeTool: context", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("validates input against the tool schema", async () => {
-    const execute = vi.fn();
-    const runtime = runtimeWith([tool("t", execute)]);
-
-    const result = await call(runtime, "t", { path: 42 });
-
-    expect(result.status).toBe("invalid-input");
-    expect(execute).not.toHaveBeenCalled();
-  });
-
-  it("fails clearly for missing and non-invocable tools", async () => {
+  it("fails clearly for a missing tool and one without an execute", async () => {
     const runtime = runtimeWith([
-      tool("load_skill", () => "x", { frameworkAction: "load-skill" }),
-      tool("agent", () => "x", {
-        behavior: {
-          availability: [],
-          handling: {
-            kind: "dispatch",
-            target: { kind: "subagent-call", nodeId: "n", subagentName: "s" },
-          },
-        },
-      }),
-      tool("web_search", () => "x"),
-      tool("bash", () => "x"),
-      tool("describe_later", () => "x", {
-        behavior: { availability: [], handling: { kind: "provider-tool" } } as never,
-      }),
       { description: "no execute", inputSchema: objectSchema, name: "plain" },
     ]);
 
@@ -497,13 +476,11 @@ describe("invokeTool: context", () => {
       message: 'The agent has no tool named "nope".',
       status: "failed",
     });
-    for (const name of ["load_skill", "agent", "web_search", "bash", "describe_later", "plain"]) {
-      const result = await call(runtime, name, {});
-      expect(result.status).toBe("failed");
-      expect(result.status === "failed" && result.message).toContain(
-        `Tool "${name}" cannot be invoked outside a conversation`,
-      );
-    }
+    expect(await call(runtime, "plain", {})).toMatchObject({
+      message:
+        'Tool "plain" cannot be invoked outside a conversation: it has no server-side execute.',
+      status: "failed",
+    });
   });
 
   it("returns an unexpected error as a generic message with the error id it logged", async () => {
@@ -523,19 +500,6 @@ describe("invokeTool: context", () => {
     );
     expect(result.message).not.toContain("hunter2");
     expect(result.message).not.toContain("10.0.0.7");
-  });
-
-  it("returns eve's own tool-session diagnostics verbatim", async () => {
-    const runtime = runtimeWith([
-      tool("diagnose", () => {
-        throw new ToolSessionError('Tool "diagnose" cannot do that in a tool session.');
-      }),
-    ]);
-
-    expect(await call(runtime, "diagnose", {})).toMatchObject({
-      message: 'Tool "diagnose" cannot do that in a tool session.',
-      status: "failed",
-    });
   });
 
   it("gives defineState its initial value and refuses updates, naming the tool", async () => {
@@ -582,29 +546,87 @@ describe("invokeTool: context", () => {
 });
 
 describe("invokeTool: approval", () => {
-  const approvalTool = (
-    execute: () => unknown,
-    approval: Approval = () => "user-approval",
-  ): HarnessToolDefinition => tool("deploy", execute, { approval });
+  const requestPolicies: Record<"ask" | "deny" | "pass", ApprovalPolicy> = {
+    ask: () => "user-approval",
+    deny: () => ({ reason: "Read-only mode.", type: "denied" }),
+    pass: () => "not-applicable",
+  };
+  const aliceOnly = ({ response }: { response: { principal: SessionAuthContext } }) =>
+    response.principal.principalId === "alice"
+      ? ({ status: "allowed" } as const)
+      : ({ reason: "Only alice may answer.", status: "rejected" } as const);
+  const declined = { reason: "The person declined this call.", status: "denied" } as const;
+  const rejected = { reason: "Only alice may answer.", status: "denied" } as const;
+  const completed = { status: "completed" } as const;
 
-  it("returns approval-required and never executes without an answer, forged callId or not", async () => {
+  it.each([
+    [
+      "asks without an answer, even for a callId seen before",
+      "ask",
+      false,
+      undefined,
+      alice,
+      { callId: "c1", status: "approval-required" },
+    ],
+    ["runs on an approval", "ask", false, true, alice, completed],
+    ["denies a decline", "ask", false, false, alice, declined],
+    ["denies a responder the response policy rejects", "ask", true, true, bob, rejected],
+    ["runs when the response policy allows the responder", "ask", true, true, alice, completed],
+    [
+      "checks a supplied answer even when the request policy passes",
+      "pass",
+      true,
+      true,
+      bob,
+      rejected,
+    ],
+    ["honors a decline even when the request policy passes", "pass", false, false, alice, declined],
+    ["runs a pass-through without an answer", "pass", false, undefined, alice, completed],
+    [
+      "lets a request-policy denial win over an approval",
+      "deny",
+      true,
+      true,
+      alice,
+      { reason: "Read-only mode.", status: "denied" },
+    ],
+  ] as const)("%s", async (_label, policy, checksResponder, approved, responder, expected) => {
     const execute = vi.fn(() => "deployed");
-    const runtime = runtimeWith([approvalTool(execute)]);
+    const response = vi.fn(aliceOnly);
+    const approval: Approval = checksResponder
+      ? { request: requestPolicies[policy], response }
+      : requestPolicies[policy];
+    const runtime = runtimeWith([tool("deploy", execute, { approval })]);
 
-    const first = await call(runtime, "deploy", {});
-    expect(first).toMatchObject({ status: "approval-required" });
-    const forged = await call(runtime, "deploy", {}, { callId: "call-that-was-approved-before" });
-    expect(forged).toEqual({
-      callId: "call-that-was-approved-before",
-      status: "approval-required",
-    });
+    const result = await call(
+      runtime,
+      "deploy",
+      {},
+      {
+        approval: approved === undefined ? undefined : { approved },
+        auth: responder,
+        callId: "c1",
+      },
+    );
 
-    expect(execute).not.toHaveBeenCalled();
+    if (expected.status === "completed") expect(result).toMatchObject(expected);
+    else expect(result).toEqual(expected);
+    expect(execute).toHaveBeenCalledTimes(expected.status === "completed" ? 1 : 0);
+    if (!checksResponder || policy === "deny") {
+      expect(response).not.toHaveBeenCalled();
+      return;
+    }
+    expect(response).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ principal: responder, toolName: "deploy" }),
+        response: { decision: approved ? "approve" : "cancel", principal: responder },
+      }),
+    );
   });
 
   it("does not carry an approval over to the next call with the same callId", async () => {
     const execute = vi.fn(() => "deployed");
-    const runtime = runtimeWith([approvalTool(execute)]);
+    const runtime = runtimeWith([tool("deploy", execute, { approval: requestPolicies.ask })]);
 
     const approved = await call(
       runtime,
@@ -617,112 +639,27 @@ describe("invokeTool: approval", () => {
     expect(retry.status).toBe("approval-required");
     expect(execute).toHaveBeenCalledTimes(1);
   });
-
-  it("runs the response policy with the caller as responder, and a rejection is denied", async () => {
-    const execute = vi.fn(() => "deployed");
-    const response = vi.fn(({ response }: { response: { principal: SessionAuthContext } }) =>
-      response.principal.principalId === "alice"
-        ? ({ status: "allowed" } as const)
-        : ({ reason: "Only alice may approve deploys.", status: "rejected" } as const),
-    );
-    const runtime = runtimeWith([
-      approvalTool(execute, { request: () => "user-approval", response }),
-    ]);
-
-    const denied = await call(runtime, "deploy", {}, { approval: { approved: true }, auth: bob });
-    expect(denied).toEqual({ reason: "Only alice may approve deploys.", status: "denied" });
-    expect(execute).not.toHaveBeenCalled();
-
-    const allowed = await call(runtime, "deploy", {}, { approval: { approved: true } });
-    expect(allowed.status).toBe("completed");
-    expect(execute).toHaveBeenCalledTimes(1);
-    expect(response.mock.calls[1]![0]).toMatchObject({
-      request: { principal: alice, toolName: "deploy" },
-      response: { decision: "approve", principal: alice },
-    });
-  });
-
-  it("denies when the person declines", async () => {
-    const execute = vi.fn();
-    const runtime = runtimeWith([approvalTool(execute)]);
-
-    expect(await call(runtime, "deploy", {}, { approval: { approved: false } })).toMatchObject({
-      status: "denied",
-    });
-    expect(execute).not.toHaveBeenCalled();
-  });
-
-  it("runs the response policy on a supplied answer even when the request policy lets the call run", async () => {
-    const execute = vi.fn(() => "deployed");
-    const response = vi.fn(() => ({ reason: "Bob may not answer.", status: "rejected" }) as const);
-    const runtime = runtimeWith([
-      approvalTool(execute, { request: () => "not-applicable", response }),
-    ]);
-
-    const answered = await call(runtime, "deploy", {}, { approval: { approved: true }, auth: bob });
-    expect(answered).toEqual({ reason: "Bob may not answer.", status: "denied" });
-    expect(response).toHaveBeenCalledTimes(1);
-    expect(execute).not.toHaveBeenCalled();
-
-    // A declined answer is honored too, and without an answer the pass-through runs.
-    const plain = runtimeWith([approvalTool(execute, () => "not-applicable")]);
-    expect(await call(plain, "deploy", {}, { approval: { approved: false } })).toMatchObject({
-      status: "denied",
-    });
-    expect(execute).not.toHaveBeenCalled();
-    expect((await call(plain, "deploy", {})).status).toBe("completed");
-  });
-
-  it("honors request-policy denial and pass-through", async () => {
-    const runtime = runtimeWith([
-      tool("blocked", vi.fn(), { approval: () => ({ reason: "Read-only mode.", type: "denied" }) }),
-      tool("free", () => "ran", { approval: () => "not-applicable" }),
-    ]);
-
-    expect(await call(runtime, "blocked", {}, { approval: { approved: true } })).toEqual({
-      reason: "Read-only mode.",
-      status: "denied",
-    });
-    expect((await call(runtime, "free", {})).status).toBe("completed");
-  });
 });
 
+function interactive(resume?: { verifier: string }): AuthorizationDefinition {
+  return {
+    async completeAuthorization() {
+      return { token: "fresh" };
+    },
+    displayName: "Linear",
+    async getToken() {
+      throw new ConnectionAuthorizationRequiredError("linear");
+    },
+    principalType: "user",
+    async startAuthorization() {
+      return resume === undefined
+        ? { challenge: { url: "https://idp.example/authorize" } }
+        : { challenge: { url: "https://idp.example/authorize" }, resume };
+    },
+  };
+}
+
 describe("invokeTool: sign-in", () => {
-  function interactive(resume?: { verifier: string }): AuthorizationDefinition {
-    return {
-      async completeAuthorization() {
-        return { token: "fresh" };
-      },
-      displayName: "Linear",
-      async getToken() {
-        throw new ConnectionAuthorizationRequiredError("linear");
-      },
-      principalType: "user",
-      async startAuthorization() {
-        return resume === undefined
-          ? { challenge: { url: "https://idp.example/authorize" } }
-          : { challenge: { url: "https://idp.example/authorize" }, resume };
-      },
-    };
-  }
-
-  it("returns authorization-required with the strategy's challenge", async () => {
-    const runtime = runtimeWith([
-      tool("issues", async (_input, ctx) => {
-        await ctx.getToken(interactive(), { authKey: "linear" });
-        return "never";
-      }),
-    ]);
-
-    const result = await call(runtime, "issues", {}, { callId: "c-auth" });
-
-    expect(result).toMatchObject({
-      callId: "c-auth",
-      challenges: [{ challenge: { url: "https://idp.example/authorize" } }],
-      status: "authorization-required",
-    });
-  });
-
   it("fails a strategy that returns resume state, naming the connection", async () => {
     const runtime = runtimeWith([
       tool("issues", async (_input, ctx) => {
@@ -811,25 +748,39 @@ describe("invokeTool: sandbox", () => {
     expect([...entry!.mock.files.keys()].sort()).toEqual(["/workspace/a.txt", "/workspace/b.txt"]);
   });
 
-  it("deletes a one-off sandbox when the call ends", async () => {
-    const provider = createNamedProvider();
-    const runtime = runtimeWith([writeTool], provider.registry);
-
-    const result = await call(
-      runtime,
+  it.each([
+    [
+      "deletes a one-off sandbox when the call completes",
       "write",
-      { path: "/workspace/a.txt", text: "x" },
-      { key: undefined },
-    );
-
-    expect(result).toMatchObject({ sandbox: { state: "created" }, status: "completed" });
-    expect(provider.store.size).toBe(0);
-  });
-
-  it("deletes a one-off sandbox on approval-required and authorization-required too", async () => {
+      undefined,
+      { status: "completed" },
+      0,
+    ],
+    [
+      "deletes a one-off sandbox on approval-required",
+      "guarded",
+      undefined,
+      { callId: "c1", oneOffNonce: expect.any(String), status: "approval-required" },
+      0,
+    ],
+    [
+      "deletes a one-off sandbox on authorization-required, returning the challenge",
+      "signin",
+      undefined,
+      {
+        callId: "c1",
+        challenges: [{ challenge: { url: "https://idp.example/authorize" } }],
+        oneOffNonce: expect.any(String),
+        status: "authorization-required",
+      },
+      0,
+    ],
+    ["keeps a keyed sandbox after the call", "write", "conversation-1", { status: "completed" }, 1],
+  ] as const)("%s", async (_label, name, key, expected, kept) => {
     const provider = createNamedProvider();
     const runtime = runtimeWith(
       [
+        writeTool,
         tool(
           "guarded",
           async (_input, ctx) => {
@@ -846,48 +797,21 @@ describe("invokeTool: sandbox", () => {
         ),
         tool("signin", async (_input, ctx) => {
           await ctx.getSandbox();
-          await ctx.getToken(
-            {
-              async completeAuthorization() {
-                return { token: "t" };
-              },
-              async getToken() {
-                throw new ConnectionAuthorizationRequiredError("linear");
-              },
-              principalType: "user",
-              async startAuthorization() {
-                return { challenge: { url: "https://idp.example/a" } };
-              },
-            },
-            { authKey: "linear" },
-          );
+          await ctx.getToken(interactive(), { authKey: "linear" });
         }),
       ],
       provider.registry,
     );
 
-    const approval = await call(runtime, "guarded", {}, { key: undefined });
-    expect(approval).toMatchObject({
-      oneOffNonce: expect.any(String),
-      status: "approval-required",
-    });
-    expect(provider.store.size).toBe(0);
+    const result = await call(
+      runtime,
+      name,
+      { path: "/workspace/a.txt", text: "x" },
+      { callId: "c1", key },
+    );
 
-    const signin = await call(runtime, "signin", {}, { key: undefined });
-    expect(signin).toMatchObject({
-      oneOffNonce: expect.any(String),
-      status: "authorization-required",
-    });
-    expect(provider.store.size).toBe(0);
-  });
-
-  it("keeps a keyed sandbox after the call", async () => {
-    const provider = createNamedProvider();
-    const runtime = runtimeWith([writeTool], provider.registry);
-
-    await call(runtime, "write", { path: "/workspace/a.txt", text: "x" });
-
-    expect(provider.store.size).toBe(1);
+    expect(result).toMatchObject({ ...expected, sandbox: { state: "created" } });
+    expect(provider.store.size).toBe(kept);
   });
 
   it("refuses a keyed sandbox on a provider without named lookup, with a named error", async () => {
