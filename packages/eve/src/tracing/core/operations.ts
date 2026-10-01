@@ -1,11 +1,5 @@
 import { createTraceEngine, type TraceOperation } from "#tracing/core/engine.js";
-import {
-  frameworkAttributes,
-  identityAttributes,
-  namingAttributes,
-  runtimeContextAttributes,
-  usageAttributes,
-} from "#tracing/core/attributes.js";
+import { identityAttributes, namingAttributes, usageAttributes } from "#tracing/core/attributes.js";
 import type {
   Attributes,
   CaptureDecision,
@@ -17,6 +11,19 @@ import type {
 } from "#tracing/core/types.js";
 import type { ContentSerializer } from "#tracing/core/model.js";
 import { modelInputAttributes, modelResultAttributes } from "#tracing/core/model.js";
+import {
+  stepAttributes,
+  modelAttributes,
+  modelSelectionAttributes,
+  actionAttributes,
+  toolAttributes,
+  approvalAttributes,
+  memoryAttributes,
+  modelName,
+  toolName,
+  SPAN_NAMES,
+  applyAttributes,
+} from "#tracing/core/contract.js";
 
 export type ActionKind = "load-skill" | "remote-agent-call" | "subagent-call" | "tool-call";
 export type ActionOutcome = "abandoned" | "cancelled" | "completed" | "failed" | "rejected";
@@ -33,7 +40,6 @@ export function createAgentOperations(input: {
 }) {
   const engine = createTraceEngine(input);
   const identity = identityAttributes(input.identity);
-  const framework = frameworkAttributes(input.framework);
   const capture = input.capture;
   function payload(
     operation: TraceOperation,
@@ -82,20 +88,21 @@ export function createAgentOperations(input: {
         {
           type: "step",
           operationId: options.operationId,
-          name: "agent.step",
+          name: SPAN_NAMES.step,
           kind: "INTERNAL",
           parent: parent.reference,
           links: options.links,
-          attributes: {
-            ...identity,
-            ...framework,
-            ...namingAttributes("agent.step"),
-            "agent.turn.id": input.identity.turnId,
-            "agent.step.index": options.index,
-            "agent.step.attempt": options.attempt,
-            "agent.name": input.agentName,
-            ...runtimeContextAttributes(options.runtimeContext),
-          },
+          attributes: stepAttributes({
+            identity,
+            framework: input.framework,
+            attempt: {
+              turnId: input.identity.turnId,
+              index: options.index,
+              attempt: options.attempt,
+            },
+            agentName: input.agentName,
+            runtimeContext: options.runtimeContext,
+          }),
         },
         capture,
       );
@@ -113,19 +120,20 @@ export function createAgentOperations(input: {
         runtimeContext?: Readonly<Record<string, unknown>>;
       },
     ): TraceOperation {
-      parent.setAttribute("agent.model.id", options.modelId);
-      parent.setAttribute("agent.model.provider", options.provider);
+      applyAttributes(parent, modelSelectionAttributes(options.modelId, options.provider));
       return base(
         parent,
         options.operationId,
         "model",
-        `chat ${options.modelId}`,
+        modelName(options.modelId),
         {
-          "gen_ai.agent.name": input.agentName,
-          "gen_ai.operation.name": "chat",
-          "gen_ai.provider.name": options.provider,
-          "gen_ai.request.model": options.modelId,
-          ...runtimeContextAttributes(options.runtimeContext),
+          ...modelAttributes({
+            identity,
+            agentName: input.agentName,
+            provider: options.provider,
+            modelId: options.modelId,
+            runtimeContext: options.runtimeContext,
+          }),
           ...(capture.recordInputs && options.messages !== undefined
             ? modelInputAttributes(
                 { messages: options.messages, instructions: options.instructions },
@@ -165,20 +173,20 @@ export function createAgentOperations(input: {
         parent,
         options.operationId,
         "action",
-        "agent.action",
-        {
-          ...framework,
-          "agent.turn.id": input.identity.turnId,
-          "agent.step.index": options.stepIndex,
-          "agent.step.attempt": options.attempt,
-          "agent.action.call_id": options.callId,
-          "agent.action.name": options.name,
-          "agent.action.kind": options.kind,
-          ...(invocation
-            ? { "agent.invocation.role": "caller", "gen_ai.agent.name": options.name }
-            : undefined),
-        },
-        "agent.action",
+        SPAN_NAMES.action,
+        actionAttributes({
+          identity,
+          framework: input.framework,
+          attempt: {
+            turnId: input.identity.turnId,
+            index: options.stepIndex,
+            attempt: options.attempt,
+          },
+          callId: options.callId,
+          name: options.name,
+          kind: options.kind,
+        }),
+        SPAN_NAMES.action,
         options.kind === "remote-agent-call" ? "CLIENT" : "INTERNAL",
       );
       if (!invocation) payload(operation, "gen_ai.tool.call.arguments", options.arguments, "input");
@@ -192,14 +200,13 @@ export function createAgentOperations(input: {
         parent,
         options.operationId,
         "tool",
-        `execute_tool ${options.name}`,
-        {
-          "gen_ai.agent.name": input.agentName,
-          "gen_ai.operation.name": "execute_tool",
-          "gen_ai.tool.call.id": options.callId,
-          "gen_ai.tool.name": options.name,
-          "gen_ai.tool.type": "function",
-        },
+        toolName(options.name),
+        toolAttributes({
+          identity,
+          agentName: input.agentName,
+          callId: options.callId,
+          name: options.name,
+        }),
         "execute_tool",
       );
       payload(operation, "gen_ai.tool.call.arguments", options.arguments, "input");
@@ -248,16 +255,24 @@ export function createAgentOperations(input: {
         request?: unknown;
       },
     ): TraceOperation {
-      const operation = base(parent, options.operationId, "approval", "agent.approval", {
-        ...framework,
-        "agent.turn.id": input.identity.turnId,
-        "agent.step.index": options.stepIndex,
-        "agent.step.attempt": options.attempt,
-        "agent.action.call_id": options.callId,
-        "agent.action.name": options.actionName,
-        "agent.approval.kind": "tool-approval",
-        "agent.approval.request_id": options.requestId,
-      });
+      const operation = base(
+        parent,
+        options.operationId,
+        "approval",
+        SPAN_NAMES.approval,
+        approvalAttributes({
+          identity,
+          framework: input.framework,
+          attempt: {
+            turnId: input.identity.turnId,
+            index: options.stepIndex,
+            attempt: options.attempt,
+          },
+          callId: options.callId,
+          actionName: options.actionName,
+          requestId: options.requestId,
+        }),
+      );
       payload(operation, "agent.approval.request", options.request, "input");
       return operation;
     },
@@ -297,13 +312,7 @@ export function createAgentOperations(input: {
         options.operationId,
         "memory",
         options.operation,
-        {
-          "agent.turn.id": input.identity.turnId,
-          "gen_ai.operation.name": options.operation,
-          "gen_ai.memory.store.id": options.storeId,
-          "agent.memory.phase": options.phase,
-          "agent.memory.slot": options.slot,
-        },
+        memoryAttributes({ identity, turnId: input.identity.turnId, ...options }),
         options.operation,
         "CLIENT",
       );

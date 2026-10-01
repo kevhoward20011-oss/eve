@@ -1,6 +1,7 @@
 export { createAgentTracing } from "#tracing/core/agent-tracing.js";
 export type { ActivationMetadata, TurnInput, TurnScope } from "#tracing/core/agent-tracing.js";
 export { createTraceEngine } from "#tracing/core/engine.js";
+export * from "#tracing/core/contract.js";
 export type { TraceOperation } from "#tracing/core/engine.js";
 export { createAgentOperations } from "#tracing/core/operations.js";
 export type { ActionKind, ActionOutcome } from "#tracing/core/operations.js";
