@@ -302,11 +302,23 @@ export class McpConnectionClient implements ConnectionClient {
 
   async #fetchToolsInner(): Promise<McpToolCache> {
     const client = await this.connect();
-    const listResult = await withMcpToolsListSpan({
-      connectionName: this.#connection.connectionName,
-      execute: () => client.listTools(),
-      protocolVersion: client.initializeResult?.protocolVersion,
-    });
+    // A server that serves no tools (`mcpChannel({ tools: false })`) omits the
+    // `tools` capability and answers `tools/*` with -32601: an empty tool list.
+    const serverCapabilities = client.initializeResult?.capabilities;
+    if (serverCapabilities !== undefined && serverCapabilities["tools"] === undefined) {
+      return { metadata: [], tools: {} };
+    }
+    let listResult: Awaited<ReturnType<typeof client.listTools>>;
+    try {
+      listResult = await withMcpToolsListSpan({
+        connectionName: this.#connection.connectionName,
+        execute: () => client.listTools(),
+        protocolVersion: client.initializeResult?.protocolVersion,
+      });
+    } catch (error) {
+      if (isMethodNotFound(error)) return { metadata: [], tools: {} };
+      throw error;
+    }
 
     const filter = this.#connection.tools;
     const filteredTools =
@@ -578,4 +590,9 @@ async function resolveHeaderValue(
     return await value(getContext());
   }
   return await value;
+}
+
+/** JSON-RPC "method not found": the server does not serve that method. */
+function isMethodNotFound(error: unknown): boolean {
+  return isObject(error) && error["code"] === -32601;
 }
