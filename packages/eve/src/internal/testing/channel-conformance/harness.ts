@@ -76,7 +76,7 @@ export interface ChannelConversation {
   waitForToolResult(tool: string): Promise<unknown>;
 }
 
-const WAIT_TIMEOUT_MS = 15_000;
+const WAIT_TIMEOUT_MS = 10_000;
 
 /** A `fetch` for an HTTP platform API: `decode` turns each request into a call and its answer. */
 export function recordingFetch(
