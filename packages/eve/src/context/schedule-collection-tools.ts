@@ -10,7 +10,7 @@ import { always } from "#tools/approval/policies.js";
 import type { Approval } from "#public/definitions/approval.js";
 import { defineTool } from "#tools/definition.js";
 import type { DynamicToolEntry } from "#tools/dynamic.js";
-import type { ScheduleCollectionDefinition } from "#public/schedules/collection.js";
+import type { SchedulerDefinition } from "#public/schedules/collection.js";
 import { schedules } from "#public/experimental/schedules/client.js";
 import { assertScheduleManagementAllowed as assertClientScheduleManagementAllowed } from "#runtime/schedules/collection-client.js";
 import {
@@ -79,7 +79,7 @@ const expressionSchema = z.discriminatedUnion("type", [
 ]);
 
 export function createScheduleCollectionToolDynamicDefinition<TRequest, TMetadata>(
-  definition: ScheduleCollectionDefinition<TRequest, TMetadata>,
+  definition: SchedulerDefinition<TRequest, TMetadata>,
   identity: { readonly application: string; readonly collection: string },
 ) {
   return markDynamicCallbackRebind(

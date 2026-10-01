@@ -5,7 +5,7 @@ import { BundleKey } from "#runtime/sessions/runtime-context-keys.js";
 import type {
   ScheduleClient,
   ScheduleClientCreate,
-  ScheduleCollectionDefinition,
+  SchedulerDefinition,
   ScheduleDeliveryBinding,
   ScheduleEnvelope,
   SchedulePageResult,
@@ -42,7 +42,7 @@ const defaultRequestSchema = z.string().min(1).max(2000);
 const defaultMetadataSchema = z.object({}).strict();
 
 export function createScheduleCollectionClient<TRequest, TMetadata>(
-  definition: ScheduleCollectionDefinition<TRequest, TMetadata>,
+  definition: SchedulerDefinition<TRequest, TMetadata>,
   callContext: ScheduleBoundCallContext,
 ): ScheduleClient<TRequest, TMetadata> {
   const nextOperationId = callContext.operationId ?? randomUUID;

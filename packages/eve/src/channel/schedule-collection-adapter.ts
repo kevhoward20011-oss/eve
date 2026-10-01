@@ -4,7 +4,7 @@ import { resolveKey, type ContextKey } from "#context/key.js";
 import { BUNDLE_CONTEXT_KEY_NAME } from "#context/key-names.js";
 import { createLogger } from "#internal/logging.js";
 import type {
-  ScheduleCollectionDefinition,
+  SchedulerDefinition,
   ScheduleDeliveryBinding,
   ScheduleDeliveryEvent,
   ScheduleOccurrenceIdentity,
@@ -75,7 +75,7 @@ export function createScheduleCollectionAdapterState(input: {
  * suited to every destination in a single pass.
  */
 export function scheduleDeliveryOutputSchema(
-  definition: ScheduleCollectionDefinition<unknown, unknown>,
+  definition: SchedulerDefinition<unknown, unknown>,
   names: readonly string[],
 ): JsonObject {
   return {
@@ -95,7 +95,7 @@ export function scheduleDeliveryOutputSchema(
 async function reloadDefinition(
   context: ChannelAdapterContext,
   collection: string,
-): Promise<ScheduleCollectionDefinition<unknown, unknown>> {
+): Promise<SchedulerDefinition<unknown, unknown>> {
   const bundleKey = resolveKey(BUNDLE_CONTEXT_KEY_NAME) as
     | ContextKey<CompiledRuntimeAgentBundle>
     | undefined;
@@ -148,7 +148,7 @@ async function settleDeliveries(context: ChannelAdapterContext): Promise<void> {
   // One delivery requests no structured output: its content is the final reply.
   if (state.content === undefined && selected.length === 1 && state.lastMessage?.trim())
     state.content = { [selected[0]!]: state.lastMessage.trim() };
-  let definition: ScheduleCollectionDefinition<unknown, unknown>;
+  let definition: SchedulerDefinition<unknown, unknown>;
   try {
     definition = await reloadDefinition(context, state.collection);
   } catch (error) {
@@ -180,7 +180,7 @@ async function failPendingDeliveries(
   if (state === undefined) return;
   const names = pendingNames(state);
   if (names.length === 0) return;
-  let definition: ScheduleCollectionDefinition<unknown, unknown> | undefined;
+  let definition: SchedulerDefinition<unknown, unknown> | undefined;
   try {
     definition = await reloadDefinition(context, state.collection);
   } catch (error) {
@@ -203,7 +203,7 @@ async function failPendingDeliveries(
 type DeliveryOutcome = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
 async function runDelivery(
-  definition: ScheduleCollectionDefinition<unknown, unknown>,
+  definition: SchedulerDefinition<unknown, unknown>,
   state: ScheduleCollectionAdapterState,
   name: string,
   content: string,
@@ -271,7 +271,7 @@ async function runDelivery(
 }
 
 async function report(
-  definition: ScheduleCollectionDefinition<unknown, unknown>,
+  definition: SchedulerDefinition<unknown, unknown>,
   state: ScheduleCollectionAdapterState,
   name: string,
   sessionId: string,

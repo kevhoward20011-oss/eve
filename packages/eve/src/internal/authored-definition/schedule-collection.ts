@@ -1,8 +1,5 @@
 import { expectObjectRecord, expectOnlyKnownKeys } from "#internal/authored-module.js";
-import type {
-  ScheduleCollectionDefinition,
-  ScheduleProvider,
-} from "#public/schedules/collection.js";
+import type { SchedulerDefinition, ScheduleProvider } from "#public/schedules/collection.js";
 import { SCHEDULE_DELIVERY_NAME_PATTERN } from "#runtime/schedules/validation.js";
 import { isScheduleCollectionDefinition } from "#shared/schedule-collection-definition.js";
 
@@ -77,7 +74,7 @@ function normalizeDeliveries(value: unknown, message: string): void {
 export function normalizeScheduleCollectionDefinition(
   value: unknown,
   message: string,
-): ScheduleCollectionDefinition {
+): SchedulerDefinition {
   if (!isScheduleCollectionDefinition(value)) throw new Error(message);
   const record = expectObjectRecord(value, message);
   expectOnlyKnownKeys(record, DEFINITION_KEYS, message);
@@ -146,5 +143,5 @@ export function normalizeScheduleCollectionDefinition(
       }
     }
   }
-  return value as ScheduleCollectionDefinition;
+  return value as SchedulerDefinition;
 }

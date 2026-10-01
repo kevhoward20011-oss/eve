@@ -232,8 +232,8 @@ export interface ScheduleClient<TRequest, TMetadata> {
 }
 
 /**
- * Configuration for one dynamic schedule collection. Export a value created by
- * {@link defineScheduleCollection} from a file under `agent/schedules/`.
+ * Configures runtime creation and management of future agent runs. Export a value created by
+ * {@link defineScheduler} from a file under `agent/schedules/`.
  *
  * Each operation is authorized by `scope`; by default, schedules are isolated
  * by the authenticated principal. The provider stores schedule timing and an
@@ -244,7 +244,7 @@ export interface ScheduleClient<TRequest, TMetadata> {
  * @typeParam TRequest - Validated request data captured at schedule creation.
  * @typeParam TMetadata - Validated application metadata captured at creation.
  */
-export interface ScheduleCollectionDefinition<
+export interface SchedulerDefinition<
   TRequest = string,
   TMetadata = Readonly<Record<string, never>>,
 > {
@@ -300,34 +300,35 @@ export interface ScheduleCollectionDefinition<
   readonly tools?: false | { readonly approval?: Partial<Record<ScheduleOperation, Approval>> };
 }
 
-/** A collection definition carrying the marker required by eve's compiler. */
-export type DefinedScheduleCollection<
+/** A scheduler definition carrying the marker required by eve's compiler. */
+export type DefinedScheduler<
   TRequest = string,
   TMetadata = Readonly<Record<string, never>>,
-> = ScheduleCollectionDefinition<TRequest, TMetadata> & {
+> = SchedulerDefinition<TRequest, TMetadata> & {
   readonly [SCHEDULE_COLLECTION_DEFINITION_BRAND]: true;
 };
 
 /**
- * Defines a dynamic schedule collection for an `agent/schedules/` module.
- * The definition object is marked in place for compiler discovery; collection
- * identity comes from the module path, not from a `name` property.
+ * Defines who can create and manage runtime schedules, whose identity executes
+ * their requests, and where results go. This configures a scheduler, not one
+ * schedule or its timing. Export it from an `agent/schedules/` module; identity
+ * comes from the module path, not from a `name` property.
  *
  * @typeParam TRequest - Validated request data captured when a schedule is created.
  * @typeParam TMetadata - Validated application metadata captured at creation.
- * @param definition - Provider and policies for this collection.
- * @returns The same definition, marked as a schedule collection.
+ * @param definition - Provider, authorization policies, and deliveries for this scheduler.
+ * @returns The same definition, marked as a scheduler.
  *
- * @example A principal-scoped collection that archives each result
+ * @example A principal-scoped scheduler that archives each result
  * ```ts
  * import {
- *   defineScheduleCollection,
+ *   defineScheduler,
  *   defineScheduleDelivery,
  * } from "eve/experimental/schedules";
  * import { vercelScheduleProvider } from "eve/experimental/schedules/vercel";
  * import { resolveCurrentUser } from "../lib/identity";
  *
- * export default defineScheduleCollection({
+ * export default defineScheduler({
  *   provider: vercelScheduleProvider(),
  *   auth: ({ principal }) => resolveCurrentUser(principal),
  *   deliveries: {
@@ -339,15 +340,12 @@ export type DefinedScheduleCollection<
  * });
  * ```
  */
-export function defineScheduleCollection<
-  TRequest = string,
-  TMetadata = Readonly<Record<string, never>>,
->(
+export function defineScheduler<TRequest = string, TMetadata = Readonly<Record<string, never>>>(
   definition: ExactDefinition<
-    ScheduleCollectionDefinition<TRequest, TMetadata>,
-    ScheduleCollectionDefinition<TRequest, TMetadata>
+    SchedulerDefinition<TRequest, TMetadata>,
+    SchedulerDefinition<TRequest, TMetadata>
   >,
-): DefinedScheduleCollection<TRequest, TMetadata> {
+): DefinedScheduler<TRequest, TMetadata> {
   Object.assign(definition, { [SCHEDULE_COLLECTION_DEFINITION_BRAND]: true });
-  return definition as DefinedScheduleCollection<TRequest, TMetadata>;
+  return definition as DefinedScheduler<TRequest, TMetadata>;
 }

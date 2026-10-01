@@ -2,7 +2,7 @@ import { ScheduleDispatcher } from "#channel/schedule.js";
 import type { Session } from "#channel/session.js";
 import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
 import type {
-  ScheduleCollectionDefinition,
+  SchedulerDefinition,
   ScheduleOccurrenceIdentity,
 } from "#public/schedules/collection.js";
 import type { ScheduleCollectionPayload } from "#runtime/schedules/payload.js";
@@ -18,7 +18,7 @@ type DispatchInput = Parameters<ScheduleDispatcher["triggerCollection"]>[0];
 export async function admitScheduledOccurrence(input: {
   readonly bundle: Pick<CompiledRuntimeAgentBundle, "compiledArtifactsSource" | "graph">;
   readonly collection: string;
-  readonly definition: ScheduleCollectionDefinition<any, any>;
+  readonly definition: SchedulerDefinition<any, any>;
   readonly namespace: string;
   readonly occurrence: ScheduleOccurrenceIdentity;
   readonly payload: ScheduleCollectionPayload<unknown, unknown>;

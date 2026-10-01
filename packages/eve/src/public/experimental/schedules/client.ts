@@ -4,7 +4,7 @@ import { normalizeScheduleCollectionDefinition } from "#internal/authored-defini
 import { readScheduleCollectionSource } from "#shared/schedule-collection-definition.js";
 import { buildResolveContext } from "#context/dynamic-resolve-context.js";
 import type {
-  DefinedScheduleCollection,
+  DefinedScheduler,
   ScheduleClient,
   ScheduleScopeContext,
 } from "#public/schedules/collection.js";
@@ -12,7 +12,7 @@ import { createScheduleCollectionClient } from "#runtime/schedules/collection-cl
 
 /** Binds a registered collection to a scope checked by its per-operation policy. */
 export async function schedules<TRequest, TMetadata>(
-  collection: DefinedScheduleCollection<TRequest, TMetadata>,
+  collection: DefinedScheduler<TRequest, TMetadata>,
 ): Promise<ScheduleClient<TRequest, TMetadata>> {
   const identity = readScheduleCollectionSource(collection);
   if (identity === undefined) {
@@ -21,7 +21,7 @@ export async function schedules<TRequest, TMetadata>(
   const definition = normalizeScheduleCollectionDefinition(
     collection,
     `Invalid schedule collection ${identity.logicalPath}.`,
-  ) as DefinedScheduleCollection<TRequest, TMetadata>;
+  ) as DefinedScheduler<TRequest, TMetadata>;
   const als = loadContext();
   const resolved = buildResolveContext(als, []);
   const scopeContext: ScheduleScopeContext = {

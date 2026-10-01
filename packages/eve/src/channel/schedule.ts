@@ -20,7 +20,7 @@ import type {
   ScheduleRunHandler,
 } from "#public/definitions/schedule.js";
 import type {
-  ScheduleCollectionDefinition,
+  SchedulerDefinition,
   ScheduleOccurrenceIdentity,
 } from "#public/schedules/collection.js";
 import {
@@ -47,7 +47,7 @@ export interface ScheduleDispatchResult {
 }
 export interface ScheduleCollectionDispatchInput {
   readonly collectionId: string;
-  readonly definition: ScheduleCollectionDefinition<any, any>;
+  readonly definition: SchedulerDefinition<any, any>;
   readonly payload: ScheduleCollectionPayload<unknown, unknown>;
   readonly occurrence: ScheduleOccurrenceIdentity;
   readonly scheduleName: string;

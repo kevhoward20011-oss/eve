@@ -5,9 +5,9 @@
  */
 export { schedules } from "#public/experimental/schedules/client.js";
 export {
-  defineScheduleCollection,
-  type DefinedScheduleCollection,
-  type ScheduleCollectionDefinition,
+  defineScheduler,
+  type DefinedScheduler,
+  type SchedulerDefinition,
   type ScheduleCreated,
   type ScheduleCreate,
   type ScheduleExpression,
