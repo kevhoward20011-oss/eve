@@ -14,7 +14,11 @@ import { loadContext } from "#context/container.js";
 import { CapabilitiesKey } from "#context/keys.js";
 import { requestRemoteInput, takeRemoteInputContinuation } from "#harness/remote-input.js";
 import { isMcpInputRequiredOutcome } from "#runtime/connections/mcp-client.js";
-import { planMcpInput, type McpInputRetry } from "#runtime/connections/mcp-input-required.js";
+import {
+  planMcpInput,
+  type McpInputRetry,
+  type McpSignInLink,
+} from "#runtime/connections/mcp-input-required.js";
 import { ConnectionRegistryKey } from "#context/providers/connection-key.js";
 import { getAuthorizationResults, type AuthorizationSignal } from "#harness/authorization.js";
 import { reportNestedToolAction } from "#harness/nested-actions.js";
@@ -428,11 +432,7 @@ async function executeConnectionTool(
     return requestRemoteInput({
       approve: { attempt, inputResponses: plan.approve, requestState: raw.requestState },
       connection: connection.connectionName,
-      prompt:
-        plan.kind === "sign-in"
-          ? `${plan.message ?? `${toolName} needs you to sign in.`}\n\nSign in at ${plan.url}, ` +
-            "then approve to continue."
-          : plan.prompt,
+      prompt: plan.kind === "sign-in" ? signInPrompt(toolName, plan.links) : plan.prompt,
     });
   }
 
@@ -448,6 +448,14 @@ async function executeConnectionTool(
   }
   reportNestedToolAction(ctx.callId, { input, output: result.value, toolName });
   return result.value;
+}
+
+/** One prompt for every page the user must visit before the call can retry. */
+function signInPrompt(toolName: string, links: readonly McpSignInLink[]): string {
+  const lines = links.map((link) => `- ${link.message ?? "Sign in"}: ${link.url}`);
+  return [`${toolName} needs you to sign in first.`, ...lines, "Approve once you're done."].join(
+    "\n",
+  );
 }
 
 /** Validates `input` against the tool's schema, returning it with schema defaults filled in. */

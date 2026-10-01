@@ -291,11 +291,18 @@ export function parseInputRequiredResult(
  * - `approval`: one form elicitation whose schema is a single boolean, the
  *   shape eve's `mcpChannel` sends for a tool approval. `approve` is the
  *   `inputResponses` that answers yes.
- * - `sign-in`: one URL-mode elicitation, such as a provider sign-in page.
+ * - `sign-in`: only URL-mode elicitations, such as one provider sign-in page
+ *   per connection the remote tool needs.
  * - `retry`: no `inputRequests`, only `requestState`; the client may retry.
  * - `unsupported`: anything else (sampling, roots, richer forms, several
  *   requests). eve fails the call rather than guess an answer.
  */
+/** One page the user must visit, from a URL-mode elicitation. */
+export interface McpSignInLink {
+  readonly message?: string;
+  readonly url: string;
+}
+
 export type McpInputPlan =
   | {
       readonly approve: Readonly<Record<string, unknown>>;
@@ -307,34 +314,28 @@ export type McpInputPlan =
       /** `inputResponses` that tell the server the user finished in the browser. */
       readonly approve: Readonly<Record<string, unknown>>;
       readonly kind: "sign-in";
-      readonly message?: string;
-      readonly url: string;
+      readonly links: readonly McpSignInLink[];
     }
   | { readonly kind: "unsupported"; readonly reason: string };
 
 export function planMcpInput(result: McpInputRequiredResult): McpInputPlan {
   const entries = Object.entries(result.inputRequests ?? {});
   if (entries.length === 0) return { kind: "retry" };
+  for (const [, request] of entries) {
+    if (request.method !== "elicitation/create") {
+      return { kind: "unsupported", reason: `it sent a ${request.method} request` };
+    }
+  }
+  if (entries.every(([, request]) => request.params?.["mode"] === "url")) {
+    return planSignIn(entries);
+  }
   if (entries.length > 1) {
     return { kind: "unsupported", reason: `it asked for ${entries.length} inputs at once` };
   }
   const [key, request] = entries[0]!;
-  if (request.method !== "elicitation/create") {
-    return { kind: "unsupported", reason: `it sent a ${request.method} request` };
-  }
   const params = request.params ?? {};
   const message = typeof params["message"] === "string" ? params["message"] : undefined;
   const mode = params["mode"] ?? "form";
-  if (mode === "url") {
-    const url = params["url"];
-    if (typeof url !== "string" || !/^https?:\/\//u.test(url)) {
-      return { kind: "unsupported", reason: "it sent a URL elicitation without an http(s) URL" };
-    }
-    const approve = { [key]: { action: "accept" } };
-    return message === undefined
-      ? { approve, kind: "sign-in", url }
-      : { approve, kind: "sign-in", message, url };
-  }
   if (mode !== "form") {
     return { kind: "unsupported", reason: `it sent an elicitation in "${String(mode)}" mode` };
   }
@@ -357,4 +358,20 @@ function singleBooleanProperty(schema: unknown): string | undefined {
   if (properties.length !== 1) return undefined;
   const [name, definition] = properties[0]!;
   return isObject(definition) && definition["type"] === "boolean" ? name : undefined;
+}
+
+/** Every entry is a URL elicitation: one sign-in prompt, accepted together. */
+function planSignIn(entries: readonly (readonly [string, McpInputRequest])[]): McpInputPlan {
+  const approve: Record<string, unknown> = {};
+  const links: McpSignInLink[] = [];
+  for (const [key, request] of entries) {
+    const url = request.params?.["url"];
+    if (typeof url !== "string" || !/^https?:\/\//u.test(url)) {
+      return { kind: "unsupported", reason: "it sent a URL elicitation without an http(s) URL" };
+    }
+    const message = request.params?.["message"];
+    links.push(typeof message === "string" ? { message, url } : { url });
+    approve[key] = { action: "accept" };
+  }
+  return { approve, kind: "sign-in", links };
 }
