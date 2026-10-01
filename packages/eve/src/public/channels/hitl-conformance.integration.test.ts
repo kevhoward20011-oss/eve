@@ -42,8 +42,8 @@ const channels: readonly {
     driver: telegramDriver,
     broken: {
       "a text reply matching an option answers the only pending question": {
-        reason: "the leftover channel context interrupts the turn and withdraws the question",
-        // The bot answers its own context block instead of the question resolving.
+        reason: "the reply's context block reaches the model as its own message after the answer",
+        // The question resolves, then the bot answers the leftover context block.
         symptom:
           /Timed out waiting for ask_question to return[\s\S]*Bootstrap reply \[Tool execution\]: <telegram_context>/,
       },
