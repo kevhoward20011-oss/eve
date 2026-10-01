@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { deployedSelfModificationConfigSchema } from "./config-schema.js";
+import { selfModificationConfigSchema } from "../extension/config-schema.js";
 
-function validate(value: unknown) {
-  const result = deployedSelfModificationConfigSchema["~standard"].validate(value);
+function validate(deployed: unknown) {
+  const result = selfModificationConfigSchema["~standard"].validate({ deployed });
   if (result instanceof Promise) throw new Error("Expected synchronous validation.");
   return result;
 }
@@ -24,6 +24,7 @@ describe("deployed self-modification configuration", () => {
   it.each([
     ["repository", { ...deployed, repository: "github.com/acme/agents" }, "owner/repo"],
     ["repository owner", { ...deployed, repository: "-acme/agents" }, "owner/repo"],
+    ["owner characters", { ...deployed, repository: "acme_corp/agents" }, "owner/repo"],
     ["directory", { ...deployed, directory: "../agents" }, "safe repository-relative"],
     ["base branch", { ...deployed, baseBranch: "refs/heads/main" }, "not a full Git ref"],
     ["lock ref", { ...deployed, baseBranch: "main.lock" }, "valid branch name"],
@@ -35,6 +36,7 @@ describe("deployed self-modification configuration", () => {
       "authorize must be a function",
     ],
     ["unknown key", { ...deployed, target: { branch: "main" } }, "target"],
+    ["nested model", { ...deployed, model: "openai/gpt-5.4" }, "model"],
   ])("rejects an invalid %s", (_name, config, message) => {
     const issues = validate(config).issues ?? [];
     expect(

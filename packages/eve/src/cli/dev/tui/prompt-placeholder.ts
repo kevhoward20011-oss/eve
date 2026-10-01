@@ -8,11 +8,13 @@ const scaffoldedSourcePaths = new Set(
   Object.values(SCAFFOLDED_AGENT_PATHS).map((path) => path.slice("agent/".length)),
 );
 
+/** Includes extensions nested inside self-modification, such as its deployed child's code mount. */
 function isSelfModification(source: AgentInfoSource): boolean {
   return (
     source.owner.kind === "extension" &&
     source.owner.packageName === "eve" &&
-    source.owner.namespace === "self-modification"
+    (source.owner.namespace === "self-modification" ||
+      source.owner.mountId?.startsWith("extensions/self-modification/") === true)
   );
 }
 

@@ -1,8 +1,5 @@
-import type { StandardSchemaV1 } from "#compiled/@standard-schema/spec/index.js";
 import { z } from "#compiled/zod/index.js";
 import type { SessionAuthContext } from "#channel/types.js";
-import { isAgentReasoningDefinition, isRuntimeLanguageModel } from "#internal/runtime-model.js";
-import type { AgentReasoningDefinition, AgentStaticModelDefinition } from "#public/index.js";
 import { isValidGitRef } from "#shared/git.js";
 
 export interface DeployedSelfModificationAuthorizationContext {
@@ -18,7 +15,7 @@ export type DeployedSelfModificationAuthorization = (
 ) => boolean | Promise<boolean>;
 
 export interface DeployedSelfModificationConfig {
-  /** Fail-closed policy controlling who can delegate to the coding child. */
+  /** Policy controlling who can delegate to the coding child; errors deny delegation. */
   readonly authorize: DeployedSelfModificationAuthorization;
   /** GitHub repository in owner/repository form. */
   readonly repository: string;
@@ -28,11 +25,14 @@ export interface DeployedSelfModificationConfig {
   readonly baseBranch: string;
   /** Connect-backed GitHub connector. */
   readonly github: { readonly connector: string };
-  readonly model?: AgentStaticModelDefinition;
-  readonly reasoning?: AgentReasoningDefinition;
 }
 
-export function isGitHubRepositoryPart(value: string): boolean {
+/** GitHub user and organization names allow only alphanumerics and single hyphens. */
+export function isGitHubOwner(value: string): boolean {
+  return /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*$/u.test(value);
+}
+
+export function isGitHubRepositoryName(value: string): boolean {
   return (
     /^[A-Za-z0-9_.-]+$/u.test(value) && value !== "." && value !== ".." && !value.startsWith("-")
   );
@@ -53,43 +53,40 @@ export function isBranchName(value: string): boolean {
 }
 
 function isGitHubRepository(value: string): boolean {
-  const parts = value.split("/");
-  return parts.length === 2 && parts.every(isGitHubRepositoryPart);
+  const [owner, name, ...rest] = value.split("/");
+  return (
+    rest.length === 0 &&
+    owner !== undefined &&
+    name !== undefined &&
+    isGitHubOwner(owner) &&
+    isGitHubRepositoryName(name)
+  );
 }
 
-// Typed as a Standard Schema so the public declaration names eve's own
-// config type instead of Zod's.
-export const deployedSelfModificationConfigSchema: StandardSchemaV1<DeployedSelfModificationConfig> =
-  z
-    .object({
-      authorize: z.custom<DeployedSelfModificationAuthorization>(
-        (value) => typeof value === "function",
-        "Deployed self-modification authorize must be a function.",
+export const deployedSelfModificationConfigSchema = z
+  .object({
+    authorize: z.custom<DeployedSelfModificationAuthorization>(
+      (value) => typeof value === "function",
+      "Deployed self-modification authorize must be a function.",
+    ),
+    repository: z
+      .string()
+      .refine(
+        isGitHubRepository,
+        "Deployed self-modification repository must use owner/repo form.",
       ),
-      repository: z
-        .string()
-        .refine(
-          isGitHubRepository,
-          "Deployed self-modification repository must use owner/repo form.",
-        ),
-      directory: z
-        .string()
-        .refine(
-          isRepositoryRelativeDirectory,
-          "Deployed self-modification directory must be a safe repository-relative path.",
-        ),
-      baseBranch: z
-        .string()
-        .refine(
-          isBranchName,
-          "Deployed self-modification baseBranch must be a valid branch name, not a full Git ref.",
-        ),
-      github: z.object({ connector: z.string().min(1) }),
-      model: z
-        .custom<AgentStaticModelDefinition>(
-          (value) => typeof value === "string" || isRuntimeLanguageModel(value),
-        )
-        .optional(),
-      reasoning: z.custom<AgentReasoningDefinition>(isAgentReasoningDefinition).optional(),
-    })
-    .strict();
+    directory: z
+      .string()
+      .refine(
+        isRepositoryRelativeDirectory,
+        "Deployed self-modification directory must be a safe repository-relative path.",
+      ),
+    baseBranch: z
+      .string()
+      .refine(
+        isBranchName,
+        "Deployed self-modification baseBranch must be a valid branch name, not a full Git ref.",
+      ),
+    github: z.object({ connector: z.string().min(1) }).strict(),
+  })
+  .strict();

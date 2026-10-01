@@ -75,7 +75,9 @@ describe("packed package consumption", () => {
 
   it("builds a fresh app using only installed tarball contents", async () => {
     await access(join(packageRoot, "dist/src/index.js"));
-    await access(join(packageRoot, "dist/src/self-modification/deployed/extension.js"));
+    await access(
+      join(packageRoot, "dist/src/self-modification/extension/subagents/deployed/agent.js"),
+    );
     await access(join(packageRoot, "dist/src/self-modification/agent.js"));
     await access(join(packageRoot, "dist/src/self-modification/config.js"));
     await access(join(packageRoot, "dist/src/self-modification/sandbox.js"));
@@ -181,7 +183,8 @@ import { createAgentSourceManifest } from "./node_modules/eve/dist/src/discover/
 const manifest = createAgentSourceManifest({ agentId: "packed-dev", agentRoot: "/virtual/agent", appRoot: "/virtual" });
 const compiled = await compileAgentManifest(manifest, { developmentExtensions: defaultDevelopmentExtensions() });
 const subagent = compiled.subagents.find((entry) => entry.name === "self-modification__agent");
-if (compiled.subagents.length !== 1 || subagent === undefined || !subagent.agent.tools.some((tool) => tool.name === "edit_file")) {
+const deployed = compiled.subagents.find((entry) => entry.name === "self-modification__deployed");
+if (subagent === undefined || !subagent.agent.tools.some((tool) => tool.name === "edit_file") || !deployed?.agent.tools.some((tool) => tool.name === "code__gh")) {
   throw new Error("Packed eve did not discover the bundled self-modification extension.");
 }
 `,
@@ -189,14 +192,16 @@ if (compiled.subagents.length !== 1 || subagent === undefined || !subagent.agent
     await run("node", ["verify-development-extension.mjs"], appRoot);
     await writeAppFile(
       appRoot,
-      "agent/extensions/self-modification.ts",
-      `import selfModification from "eve/self-modification/deployed";
+      "agent/extensions/self-modification/extension.ts",
+      `import selfModification from "eve/self-modification";
 export default selfModification({
-  authorize: () => true,
-  repository: "acme/agents",
-  directory: ".",
-  baseBranch: "main",
-  github: { connector: "github/agent-author" },
+  deployed: {
+    authorize: () => true,
+    repository: "acme/agents",
+    directory: ".",
+    baseBranch: "main",
+    github: { connector: "github/agent-author" },
+  },
 });
 `,
     );
@@ -207,12 +212,12 @@ export default selfModification({
 import { discoverAgent } from "./node_modules/eve/dist/src/discover/discover-agent.js";
 import { compileAgentManifest } from "./node_modules/eve/dist/src/compiler/normalize-manifest.js";
 
-process.env.VERCEL = "1";
 const discovered = await discoverAgent({ appRoot: process.cwd(), agentRoot: process.cwd() + "/agent" });
 assert.deepEqual(discovered.diagnostics.filter((entry) => entry.severity === "error"), []);
 const compiled = await compileAgentManifest(discovered.manifest);
-const child = compiled.subagents.find((entry) => entry.name === "self-modification__agent");
+const child = compiled.subagents.find((entry) => entry.name === "self-modification__deployed");
 assert.ok(child);
+assert.ok(compiled.subagents.some((entry) => entry.name === "self-modification__agent"));
 assert.ok(child.agent.extensionMounts.some((mount) => mount.namespace === "code"));
 assert.ok(child.agent.tools.some((tool) => tool.name === "code__gh"));
 assert.ok(!compiled.tools.some((tool) => tool.name === "code__gh"));
@@ -221,7 +226,6 @@ assert.ok(compiled.subagents.some((entry) => entry.parentNodeId === child.nodeId
 `,
     );
     await run("node", ["verify-deployed-extension.mjs"], appRoot);
-    await rm(join(appRoot, "agent/extensions/self-modification.ts"));
     const build = await run("pnpm", ["exec", "eve", "build", "--skip-sandbox-prewarm"], appRoot);
     const output = `${build.stdout}\n${build.stderr}`;
     if (output.includes("Could not resolve '#shared/")) {

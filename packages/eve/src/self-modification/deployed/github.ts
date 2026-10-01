@@ -1,7 +1,7 @@
 import type { SandboxNetworkPolicy, SandboxSession } from "eve/sandbox";
 import type { GitHubLeaseBroker } from "eve/extensions/code";
 
-import selfModification from "./extension.js";
+import type { DeployedSelfModificationConfig } from "./config-schema.js";
 
 type NetworkPolicySandboxSession = SandboxSession & {
   setNetworkPolicy(policy: SandboxNetworkPolicy): Promise<void>;
@@ -19,11 +19,10 @@ export const brokerGitHubLease: GitHubLeaseBroker = async (sandbox, rules) => {
   await sandbox.setNetworkPolicy(rules === null ? "allow-all" : { allow: { "*": [], ...rules } });
 };
 
-export function deployedGitHubConfig() {
-  const { github, repository } = selfModification.config;
+export function deployedGitHubConfig(config: DeployedSelfModificationConfig) {
   return {
     broker: brokerGitHubLease,
-    connector: github.connector,
-    org: repository.slice(0, repository.indexOf("/")),
+    connector: config.github.connector,
+    org: config.repository.slice(0, config.repository.indexOf("/")),
   };
 }

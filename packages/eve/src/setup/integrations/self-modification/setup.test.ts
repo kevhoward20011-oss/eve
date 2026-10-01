@@ -163,7 +163,7 @@ describe("self-modification integration setup", () => {
       expect.stringContaining('repository: "acme/agents"'),
     );
     expect(effects.writeConfig).toHaveBeenCalledWith(
-      expect.stringContaining('import selfModification from "eve/self-modification/deployed"'),
+      expect.stringContaining('import selfModification from "eve/self-modification";'),
     );
     expect(ctx.note).toHaveBeenCalledWith(
       expect.stringContaining("Replace the allow-all `authorize` policy"),
@@ -189,6 +189,32 @@ describe("self-modification integration setup", () => {
     expect(ctx.resolveVercelProject).toHaveBeenCalledWith("self-modification");
     expect(effects.writeConfig).toHaveBeenCalledWith(
       expect.stringContaining('github: { connector: "github/selfmod-acme-agents" }'),
+    );
+  });
+
+  it("provisions the connector but leaves an authored mount for the operator to merge", async () => {
+    const effects = operations(
+      'import selfModification from "eve/self-modification";\n\nexport default selfModification({ model: "openai/gpt-5.4" });\n',
+    );
+    const deps = applyDependencies();
+    const ctx = contexts({
+      "self-modification-mode": "deployed",
+      "self-modification-repository-owner": "acme",
+      "self-modification-repository-name": "agents",
+      "self-modification-repository-directory": "apps/support",
+      "self-modification-target-branch": "main",
+      "self-modification-confirm": true,
+    });
+
+    const plan = await prepareSelfModificationSetup(ctx.prepare, effects);
+    await applySelfModificationSetup(plan, ctx.apply, effects, deps);
+
+    expect(effects.findOrCreateConnector).toHaveBeenCalled();
+    expect(effects.writeConfig).not.toHaveBeenCalled();
+    expect(ctx.note).toHaveBeenCalledWith(
+      expect.stringMatching(/^deployed: \{\n[\s\S]*repository: "acme\/agents"/u),
+      "Add this deployed option to agent/extensions/self-modification/extension.ts",
+      { tone: "warning" },
     );
   });
 

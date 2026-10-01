@@ -60,7 +60,7 @@ The application package.json is not mounted. Do not search outside /source for a
 
 const selfModificationSubagentGuidance = `## Changing the self-modification subagent
 
-Only when the requester explicitly names the self-modification subagent, edit whichever of /source/extensions/self-modification.ts or /source/extensions/self-modification/extension.ts exists. If neither exists, create /source/extensions/self-modification/extension.ts with write_file using this content, then make the requested model or reasoning change:
+Only when the requester explicitly names the self-modification subagent, edit whichever of /source/extensions/self-modification.ts or /source/extensions/self-modification/extension.ts exists. Change only the requested options and preserve the rest of the configuration, including any \`deployed\` block. If neither exists, create /source/extensions/self-modification/extension.ts with write_file using this content, then make the requested model or reasoning change:
 \`\`\`ts
 ${renderLocalSelfModificationExtension()}\`\`\``;
 

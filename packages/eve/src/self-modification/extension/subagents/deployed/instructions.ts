@@ -1,11 +1,13 @@
 import { defineDynamic, defineInstructions } from "eve/instructions";
 
+import { resolveActiveDeployedConfig } from "../../../config.js";
 import selfModification from "../../extension.js";
 
 export default defineDynamic({
   events: {
     "session.started": () => {
-      const config = selfModification.config;
+      const config = resolveActiveDeployedConfig(selfModification.config);
+      if (config === undefined) return null;
       const application =
         config.directory === "."
           ? "/workspace/repository"
@@ -19,7 +21,7 @@ Treat questions, investigations, and design requests as read-only: inspect and r
 
 Use the ordinary sandbox tools and eve-code's patch, grep, GitHub, and PR guidance. There is no computer-use tool in this environment. Inspect the existing branch and pull request before continuing a follow-up; preserve unrelated work and report conflicts or partial publication.
 
-Install project dependencies when needed using the repository's declared package manager and lockfile. Private dependencies may require credentials that this sandbox does not have; report the missing prerequisite rather than using host credentials. For registry capabilities, use the project's installed eve CLI (which may be at the workspace root rather than the application directory), never a global or remote CLI. Search with \`eve registry search "<query>" --json\`, then install source only with \`eve add <address> --non-interactive --skip-setup\`. Inspect installed source and dependency diffs normally. Record missing secrets or external setup as prerequisite names and actions; never ask for their values in chat.
+Install project dependencies when needed using the repository's declared package manager and lockfile. If that package manager is not on \`PATH\`, run it through \`corepack\`, for example \`corepack yarn install\`. Private dependencies may require credentials that this sandbox does not have; report the missing prerequisite rather than using host credentials. For registry capabilities, use the project's installed eve CLI (which may be at the workspace root rather than the application directory), never a global or remote CLI. Search with \`eve registry search "<query>" --json\`, then install source only with \`eve add <address> --non-interactive --skip-setup\`. Inspect installed source and dependency diffs normally. Record missing secrets or external setup as prerequisite names and actions; never ask for their values in chat.
 
 Use eve-code's authenticated GitHub commands for fetches, pushes, signed commits when required, and draft PR creation. Declare the configured repository when doing so. This workflow guidance does not restrict what a configured connector can access. Finish with a concise handoff containing the draft PR URL when created, validation run, changed scope, and any remaining prerequisite or publication issue.`,
       });

@@ -7,8 +7,10 @@ import {
   defaultSelfModificationSetupOperations,
   directoryError,
   gitRefError,
+  renderDeployedSelfModificationBlock,
   renderSelfModificationConfig,
-  repositoryPartError,
+  repositoryNameError,
+  repositoryOwnerError,
   type SelfModificationSetupOperations,
   SELF_MODIFICATION_CONFIG_PATH,
   type SelfModificationSetupValues,
@@ -49,6 +51,8 @@ type SelfModificationSetupPlan = (
   | { readonly kind: "local" }
   | {
       readonly kind: "deployed";
+      /** The existing mount has authored settings, so the operator merges the block. */
+      readonly authored: boolean;
       readonly connectorName: string;
       readonly project: VercelProjectReference;
       readonly values: SelfModificationSetupValues;
@@ -94,15 +98,7 @@ export async function prepareSelfModificationSetup(
   ),
 ): Promise<SelfModificationSetupPlan> {
   const legacyScaffold = await prepareLegacyScaffoldCleanup(context);
-  const existing = await operations.readConfig();
-  if (classifySelfModificationConfig(existing) === "authored") {
-    context.presenter.note(
-      `The existing ${SELF_MODIFICATION_CONFIG_PATH} contains authored configuration and was not overwritten.`,
-      "Manual update required",
-      { tone: "warning" },
-    );
-    return withLegacyScaffold({ kind: "authored" }, legacyScaffold);
-  }
+  const authored = classifySelfModificationConfig(await operations.readConfig()) === "authored";
 
   const mode = await context.asker.ask(
     select({
@@ -138,7 +134,7 @@ export async function prepareSelfModificationSetup(
       message: "GitHub repository owner",
       detected: detected.owner,
       required: true,
-      validate: (value) => validationResult(repositoryPartError(value)),
+      validate: (value) => validationResult(repositoryOwnerError(value)),
     }),
   );
   const repo = await context.asker.ask(
@@ -147,7 +143,7 @@ export async function prepareSelfModificationSetup(
       message: "GitHub repository name",
       detected: detected.repo,
       required: true,
-      validate: (value) => validationResult(repositoryPartError(value)),
+      validate: (value) => validationResult(repositoryNameError(value)),
     }),
   );
   const directory = await context.asker.ask(
@@ -176,9 +172,18 @@ export async function prepareSelfModificationSetup(
     repository: `${owner}/${repo}`,
   };
   context.presenter.note(
-    renderSelfModificationConfig(values),
-    `Generated ${SELF_MODIFICATION_CONFIG_PATH}`,
+    authored ? renderDeployedSelfModificationBlock(values) : renderSelfModificationConfig(values),
+    authored
+      ? `Add this deployed option to ${SELF_MODIFICATION_CONFIG_PATH}`
+      : `Generated ${SELF_MODIFICATION_CONFIG_PATH}`,
   );
+  if (authored) {
+    context.presenter.note(
+      `The existing ${SELF_MODIFICATION_CONFIG_PATH} contains authored configuration, so setup will not rewrite it. Add the deployed option to its selfModification({...}) call; other settings stay unchanged.`,
+      "Manual update required",
+      { tone: "warning" },
+    );
+  }
   context.presenter.note(
     "Install the managed GitHub App for only this repository. Repository rules must require review and prevent the connector from bypassing protected branches. Review, merge, and production deployment remain separate operator boundaries.",
     "Security summary",
@@ -189,13 +194,17 @@ export async function prepareSelfModificationSetup(
   const confirmed = await context.asker.ask(
     confirm({
       key: "self-modification-confirm",
-      message: "Create or attach this GitHub connector and write this configuration?",
+      message: authored
+        ? "Create or attach this GitHub connector?"
+        : "Create or attach this GitHub connector and write this configuration?",
       recommended: false,
       required: true,
     }),
   );
   return withLegacyScaffold(
-    confirmed ? { kind: "deployed", connectorName: name, project, values } : { kind: "local" },
+    confirmed
+      ? { kind: "deployed", authored, connectorName: name, project, values }
+      : { kind: "local" },
     legacyScaffold,
   );
 }
@@ -235,9 +244,21 @@ export async function applySelfModificationSetup(
     projectPath: context.appRoot,
     signal: context.signal,
   });
-  await operations.writeConfig(renderSelfModificationConfig({ ...plan.values, connector }));
-  context.presenter.log.success(`Updated ${SELF_MODIFICATION_CONFIG_PATH}.`);
+  const values = { ...plan.values, connector };
+  if (plan.authored) {
+    context.presenter.note(
+      renderDeployedSelfModificationBlock(values),
+      `Add this deployed option to ${SELF_MODIFICATION_CONFIG_PATH}`,
+      { tone: "warning" },
+    );
+  } else {
+    await operations.writeConfig(renderSelfModificationConfig(values));
+    context.presenter.log.success(`Updated ${SELF_MODIFICATION_CONFIG_PATH}.`);
+  }
   context.presenter.nextSteps([
+    ...(plan.authored
+      ? [`Add the deployed option shown above to ${SELF_MODIFICATION_CONFIG_PATH}.`]
+      : []),
     `Replace the allow-all \`authorize\` policy in ${SELF_MODIFICATION_CONFIG_PATH} with a custom policy for trusted callers (recommended).`,
     "Install the managed GitHub App for only the configured repository, then deploy or redeploy.",
     "After deployment, request an implementation through the agent's configured channel. It creates source proposals; production setup and deployment remain operator work.",

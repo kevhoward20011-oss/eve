@@ -1,16 +1,18 @@
 import type { DynamicResolveContext } from "#dynamic/definition.js";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const authorize = vi.hoisted(() => vi.fn());
 
 vi.mock("../../extension.js", () => ({
   default: {
     config: {
-      authorize,
-      repository: "acme/agents",
-      directory: ".",
-      baseBranch: "main",
-      github: { connector: "github/agent-author" },
+      deployed: {
+        authorize,
+        repository: "acme/agents",
+        directory: ".",
+        baseBranch: "main",
+        github: { connector: "github/agent-author" },
+      },
     },
   },
 }));
@@ -25,7 +27,22 @@ const context: DynamicResolveContext = {
 };
 
 describe("deployed self-modification delegation", () => {
-  beforeEach(() => authorize.mockReset());
+  const savedDev = process.env.EVE_DEV;
+  beforeEach(() => {
+    authorize.mockReset();
+    delete process.env.EVE_DEV;
+  });
+  afterEach(() => {
+    if (savedDev === undefined) delete process.env.EVE_DEV;
+    else process.env.EVE_DEV = savedDev;
+  });
+
+  it("leaves delegation to local self-modification during eve dev", async () => {
+    process.env.EVE_DEV = "1";
+    authorize.mockResolvedValue(true);
+    await expect(agent.events["turn.started"]?.({}, context)).resolves.toBeNull();
+    expect(authorize).not.toHaveBeenCalled();
+  });
 
   it.each(["session.started", "turn.started"] as const)(
     "denies delegation when the policy rejects or throws on %s",
@@ -43,7 +60,8 @@ describe("deployed self-modification delegation", () => {
       };
       authorize.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("policy unavailable"));
       await expect(agent.events[event]?.({}, request)).resolves.toBeNull();
-      await expect(agent.events[event]?.({}, request)).resolves.toBeNull();
+      // A throwing policy rejects so the resolver lifecycle logs it and omits the child.
+      await expect(agent.events[event]?.({}, request)).rejects.toThrow("policy unavailable");
       expect(authorize).toHaveBeenCalledWith({ channel: request.channel, principal });
     },
   );

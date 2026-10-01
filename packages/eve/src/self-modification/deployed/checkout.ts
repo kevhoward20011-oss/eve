@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { commandFailureDetail } from "#extensions/code/extension/lib/command-failure.js";
 import { executeGitHubShell } from "#extensions/code/extension/lib/github-shell.js";
 import { shellQuote } from "#extensions/code/extension/lib/shell.js";
 import {
@@ -8,6 +9,7 @@ import {
 } from "#extensions/code/extension/lib/sandbox.js";
 import { defineSandbox } from "#public/definitions/sandbox.js";
 import { SANDBOX_PROVIDER_PROBES, type DefaultSandboxProbes } from "#sandbox/providers/default.js";
+import { JustBashSandbox } from "#sandbox/providers/just-bash.js";
 import { MicrosandboxSandbox } from "#sandbox/providers/microsandbox.js";
 import { VercelSandbox } from "#sandbox/providers/vercel.js";
 import {
@@ -17,19 +19,24 @@ import {
 } from "#shared/sandbox-environment.js";
 import type { SandboxSession } from "#shared/sandbox-session.js";
 
-import selfModification from "./extension.js";
+import { resolveActiveDeployedConfig, type SelfModificationExtensionConfig } from "../config.js";
+import type { DeployedSelfModificationConfig } from "./config-schema.js";
 import { deployedGitHubConfig } from "./github.js";
+
+const UNSUPPORTED_PROVIDER =
+  "Deployed self-modification requires Vercel Sandbox or a supported microsandbox provider with mutable network policies.";
 
 /**
  * Selects an isolated provider which can revoke brokered credentials after checkout.
- * Deployed self-modification deliberately has no just-bash or Docker fallback.
+ * Returns undefined rather than throwing: sandbox modules are evaluated by `eve build`
+ * and `eve dev` on hosts that will never open this sandbox.
  */
 export function createDeployedSelfModificationEnvironment(
   probes: Pick<
     DefaultSandboxProbes,
     "isDeployedOnVercel" | "isMicrosandboxSupported"
   > = SANDBOX_PROVIDER_PROBES,
-): SandboxEnvironment {
+): SandboxEnvironment | undefined {
   const options = {
     // This supported provider option participates in template identity, so a tooling
     // release cannot reuse a snapshot prepared by an older release.
@@ -38,34 +45,35 @@ export function createDeployedSelfModificationEnvironment(
   };
   if (probes.isDeployedOnVercel()) return VercelSandbox.environment(options);
   if (probes.isMicrosandboxSupported()) return MicrosandboxSandbox.environment(options);
-  throw new Error(
-    "Deployed self-modification requires Vercel Sandbox or a supported microsandbox provider with mutable network policies.",
-  );
+  return undefined;
 }
 
 /** Installs only reusable development tooling; checkouts and credentials are session-specific. */
 export async function prepareDeployedSelfModificationSandbox(
   sandbox: Pick<SandboxSession, "run" | "resolvePath" | "writeTextFile">,
 ): Promise<void> {
+  // The eve base image already provides Node.js, pnpm, Git, and ripgrep; install only
+  // what a custom image lacks. Project package managers run through `corepack <pm>`.
   const result = await sandbox.run({
     command: [
       "set -eu",
-      "if command -v apt-get >/dev/null 2>&1; then",
+      'missing=""',
+      'command -v git >/dev/null 2>&1 || missing="$missing git"',
+      'command -v rg >/dev/null 2>&1 || missing="$missing ripgrep"',
+      'if [ -n "$missing" ] && command -v apt-get >/dev/null 2>&1; then',
       "  if [ \"$(id -u)\" = 0 ]; then APT=apt-get; else APT='sudo -n apt-get'; fi",
       "  $APT update",
-      "  $APT install -y git ripgrep ca-certificates nodejs npm",
+      "  $APT install -y $missing",
       "fi",
-      "command -v node >/dev/null 2>&1 || { echo 'eve requires Node.js in the deployed sandbox' >&2; exit 1; }",
-      "command -v npm >/dev/null 2>&1 || { echo 'eve requires npm in the deployed sandbox' >&2; exit 1; }",
-      "if ! command -v corepack >/dev/null 2>&1; then npm install -g corepack@0.34.0; fi",
-      "corepack enable",
-      "command -v git >/dev/null 2>&1 || { echo 'eve requires Git in the deployed sandbox' >&2; exit 1; }",
-      "command -v rg >/dev/null 2>&1 || { echo 'eve requires ripgrep in the deployed sandbox' >&2; exit 1; }",
+      ...["node", "npm", "git", "rg"].map(
+        (tool) =>
+          `command -v ${tool} >/dev/null 2>&1 || { echo 'eve requires ${tool} in the deployed sandbox' >&2; exit 1; }`,
+      ),
     ].join("\n"),
   });
   if (result.exitCode !== 0) {
     throw new Error(
-      `Failed to prepare deployed self-modification tooling (exit ${result.exitCode}).`,
+      `Failed to prepare deployed self-modification tooling (exit ${result.exitCode}): ${commandFailureDetail(result)}`,
     );
   }
   await installCodeTooling(sandbox);
@@ -77,9 +85,9 @@ export async function prepareDeployedSelfModificationSandbox(
  */
 export async function initializeDeployedCheckout(
   sandbox: SandboxSession,
+  config: DeployedSelfModificationConfig,
   sessionId: string,
 ): Promise<void> {
-  const config = selfModification.config;
   const repository = config.repository;
   const checkout = sandbox.resolvePath("repository");
   const result = await executeGitHubShell(
@@ -88,7 +96,7 @@ export async function initializeDeployedCheckout(
       description: `Clone the configured repository ${repository} at ${config.baseBranch} into the child workspace.`,
       permissions: [{ access: "write", provider: "github", repositories: [repository] }],
     },
-    deployedGitHubConfig(),
+    deployedGitHubConfig(config),
     { getSandbox: async () => sandbox, sessionId },
   );
   if (result.exitCode !== 0) {
@@ -119,14 +127,27 @@ export async function initializeDeployedCheckout(
   }
 }
 
-export function defineDeployedSelfModificationSandbox(): SandboxSelector {
-  const environment = createDeployedSelfModificationEnvironment();
+/**
+ * Defines the deployed child's sandbox. Outside deployed mode, or on hosts without a
+ * supported provider, it binds an inert environment and fails only when opened.
+ */
+export function defineDeployedSelfModificationSandbox(
+  extensionConfig: SelfModificationExtensionConfig,
+  probes?: Pick<DefaultSandboxProbes, "isDeployedOnVercel" | "isMicrosandboxSupported">,
+): SandboxSelector {
+  const config = resolveActiveDeployedConfig(extensionConfig);
+  const environment =
+    config === undefined ? undefined : createDeployedSelfModificationEnvironment(probes);
   return bindSandboxEnvironment(
     defineSandbox(async ({ session }) => {
+      if (config === undefined) {
+        throw new Error("Deployed self-modification is not configured for this runtime.");
+      }
+      if (environment === undefined) throw new Error(UNSUPPORTED_PROVIDER);
       const sandbox = await environment.open();
-      await initializeDeployedCheckout(sandbox, session.id);
+      await initializeDeployedCheckout(sandbox, config, session.id);
       return sandbox;
     }),
-    environment,
+    environment ?? JustBashSandbox.environment(),
   );
 }

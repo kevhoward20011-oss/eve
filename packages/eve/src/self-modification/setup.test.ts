@@ -34,8 +34,10 @@ describe("self-modification setup", () => {
       directory: "apps/support",
       repository: "acme/agents",
     });
-    expect(source).toContain('import selfModification from "eve/self-modification/deployed"');
-    expect(source).toContain('repository: "acme/agents"');
+    expect(source).toContain('import selfModification from "eve/self-modification";');
+    expect(source).toContain('// model: "provider/model"');
+    expect(source).toContain("  deployed: {\n");
+    expect(source).toContain('    repository: "acme/agents"');
     expect(source).toContain('directory: "apps/support"');
     expect(source).toContain('baseBranch: "release/production"');
     expect(source).toContain('github: { connector: "github/selfmod-acme-agents" }');

@@ -5,7 +5,7 @@ description: "Update authored agent files locally or propose repository changes 
 
 When `eve dev` starts a local server, it mounts the bundled self-modification extension by default. Ask your agent to change its instructions, tools, skills, or other files under `agent/`; eve delegates the source work to the `self-modification__agent` subagent. Connecting to an existing server with `eve remote connect --url <url>` does not add the bundled extension to that server.
 
-The bundled extension is for local development and is not included in production builds. For a deployed agent, mount the separate extension described in [Propose changes from a deployed agent](#propose-changes-from-a-deployed-agent).
+The bundled extension is for local development and is not included in production builds. To let a deployed agent propose changes, mount the extension yourself and add the `deployed` option described in [Propose changes from a deployed agent](#propose-changes-from-a-deployed-agent).
 
 ```bash
 eve dev
@@ -31,24 +31,26 @@ The first time, this creates `agent/extensions/self-modification/extension.ts` w
 
 ## Propose changes from a deployed agent
 
-Mount `eve/self-modification/deployed` in the deployed application's `agent/extensions/` directory. This is separate from the local development extension; it delegates repository work to a coding subagent rather than changing the running agent.
+Add a `deployed` option to the self-modification mount. The same mount keeps local editing in `eve dev`; outside `eve dev`, it delegates repository work to a separate coding subagent, `self-modification__deployed`, which proposes changes as draft pull requests instead of changing the running agent. Only one of the two subagents is offered at a time.
 
 ```ts
-// agent/extensions/self-modification.ts
-import selfModification from "eve/self-modification/deployed";
+// agent/extensions/self-modification/extension.ts
+import selfModification from "eve/self-modification";
 
 export default selfModification({
-  authorize: ({ principal }) => principal?.principalId === "trusted-editor",
-  repository: "acme/agents",
-  directory: "apps/support",
-  baseBranch: "main",
-  github: { connector: "github/agent-author" },
+  deployed: {
+    authorize: ({ principal }) => principal?.principalId === "trusted-editor",
+    repository: "acme/agents",
+    directory: "apps/support",
+    baseBranch: "main",
+    github: { connector: "github/agent-author" },
+  },
 });
 ```
 
-Set `directory` to `"."` when the application is at the repository root. `authorize` is required alongside the repository, directory, base branch, and connector. It receives the current authenticated `principal` (or `null`) and the request's `channel` kind and metadata. The callback must return `true` to make the coding subagent available; `false` or an error hides it. It runs on session start and each turn, including follow-ups. The example principal ID is illustrative: check the identities produced by your channel before writing your policy. Setup scaffolds `authorize: () => true`, which lets any caller who can reach the deployed agent request draft PRs, and warns you about it. We recommend replacing it with a policy that admits only trusted callers before you deploy.
+Set `directory` to `"."` when the application is at the repository root. `authorize` is required alongside the repository, directory, base branch, and connector. It receives the current authenticated `principal` (or `null`) and the request's `channel` kind and metadata. The callback must return `true` to make the coding subagent available; `false` or a thrown error hides it, and a thrown error is logged. It runs on session start and each turn, including follow-ups. The example principal ID is illustrative: check the identities produced by your channel before writing your policy. Setup scaffolds `authorize: () => true`, which lets any caller who can reach the deployed agent request draft PRs, and warns you about it. We recommend replacing it with a policy that admits only trusted callers before you deploy. If your mount file already contains settings you wrote, setup does not rewrite it; it prints the `deployed` option for you to add.
 
-This is a delegation gate, not a per-GitHub-command authorization check. GitHub access is determined separately by the connector installation and repository permissions. You can also set `model` and `reasoning` for the coding subagent. The repository must contain the configured application and its `agent/` directory. The sandbox checks out the repository before the child works in it. The child installs project dependencies when needed, using the repository's package manager and lockfile. The project `eve` CLI is available only after its dependencies are installed; in a monorepo, it may live at the workspace root rather than the application directory. Private packages need their own installation credentials; the sandbox does not inherit host credentials.
+This is a delegation gate, not a per-GitHub-command authorization check. GitHub access is determined separately by the connector installation and repository permissions. The top-level `model` and `reasoning` options apply to both the local and deployed subagents. The deployed subagent's sandbox runs on Vercel Sandbox, or on microsandbox for self-hosted deployments; on other hosts, delegation fails with an error naming the supported providers. The repository must contain the configured application and its `agent/` directory. The sandbox checks out the repository before the child works in it. The child installs project dependencies when needed, using the repository's package manager and lockfile. The project `eve` CLI is available only after its dependencies are installed; in a monorepo, it may live at the workspace root rather than the application directory. Private packages need their own installation credentials; the sandbox does not inherit host credentials.
 
 Provision a GitHub Vercel Connect connector, attach it to the deployed project, and restrict its installation to **only the configured repository**. Give it the repository permissions needed to read source, push branches, and create pull requests. Require review with repository rules that prevent the bot from bypassing protected branches. The repository setting chooses the intended checkout and PR target, **not** an access restriction on the connector: the coding tool can request tokens for other repositories in the connector's installation. Do not expose production secrets to CI or preview deployments triggered by bot-authored pushes.
 

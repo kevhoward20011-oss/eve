@@ -1,14 +1,24 @@
 import type { AgentReasoningDefinition, AgentStaticModelDefinition } from "#public/index.js";
 
+import type { DeployedSelfModificationConfig } from "./deployed/config-schema.js";
+
+export type {
+  DeployedSelfModificationAuthorization,
+  DeployedSelfModificationAuthorizationContext,
+  DeployedSelfModificationConfig,
+} from "./deployed/config-schema.js";
+
 /** Local self-modification settings shared by its bundled child and sandbox. */
 export interface SelfModificationConfig {
   readonly local?: { readonly enabled?: boolean };
 }
 
-/** Values accepted by the local self-modification extension mount. */
+/** Values accepted by the self-modification extension mount. */
 export interface SelfModificationExtensionConfig extends SelfModificationConfig {
   readonly model?: AgentStaticModelDefinition;
   readonly reasoning?: AgentReasoningDefinition;
+  /** Lets the deployed agent propose source changes as draft pull requests. */
+  readonly deployed?: DeployedSelfModificationConfig;
 }
 
 export interface ResolvedSelfModificationConfig {
@@ -42,6 +52,16 @@ export function resolveSelfModificationConfig(
 /** Local self-modification runs only inside the development runtime. */
 export function isLocalSelfModificationEnabled(config: ResolvedSelfModificationConfig): boolean {
   return process.env.EVE_DEV === "1" && config.localEnabled;
+}
+
+/**
+ * Returns the deployed configuration outside the development runtime. In `eve dev`,
+ * local self-modification owns delegation so the root agent never sees two children.
+ */
+export function resolveActiveDeployedConfig(
+  config: SelfModificationExtensionConfig,
+): DeployedSelfModificationConfig | undefined {
+  return process.env.EVE_DEV === "1" ? undefined : config.deployed;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

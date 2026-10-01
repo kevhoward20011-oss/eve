@@ -31,9 +31,15 @@ describe("development extensions", () => {
     const compiled = await compileAgentManifest(manifest(), {
       developmentExtensions: defaultDevelopmentExtensions(),
     });
-    expect(compiled.subagents).toHaveLength(1);
-    const subagent = compiled.subagents[0]!;
-    expect(subagent.name).toBe("self-modification__agent");
+    const subagent = compiled.subagents.find((entry) => entry.name === "self-modification__agent")!;
+    expect(subagent).toBeDefined();
+    const deployed = compiled.subagents.find(
+      (entry) => entry.name === "self-modification__deployed",
+    )!;
+    expect(deployed.agent.extensionMounts.map((mount) => mount.namespace)).toEqual(["code"]);
+    expect(deployed.agent.tools.map((tool) => tool.name)).toContain("code__gh");
+    expect(subagent.agent.tools.map((tool) => tool.name)).not.toContain("code__gh");
+    expect(compiled.tools.map((tool) => tool.name)).not.toContain("code__gh");
 
     expect(compiled.extensionMounts).toMatchObject([
       {

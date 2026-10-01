@@ -1,7 +1,7 @@
 ---
 issue: TBD
 status: draft
-last_updated: "2026-09-24"
+last_updated: "2026-10-01"
 ---
 
 # Deployed self-modification with eve-code
@@ -82,23 +82,33 @@ replace them with an unrestricted host shell or unbounded command execution.
 
 ## Proposed authoring API
 
-Keep `eve/self-modification` as the local product. Add a separate deployed entry
-point, with no environment-dependent local fallback:
+Keep one `eve/self-modification` mount. A `deployed` option enables the deployed
+product; the mount keeps its local behavior:
 
 ```ts
-// agent/extensions/self-modification.ts
-import selfModification from "eve/self-modification/deployed";
+// agent/extensions/self-modification/extension.ts
+import selfModification from "eve/self-modification";
 
 export default selfModification({
-  authorize: ({ principal }) => principal?.principalId === "trusted-editor",
-  repository: "acme/agents",
-  directory: "apps/support",
-  baseBranch: "main",
-  github: { connector: "github/agent-author" },
   // model: "provider/model",
   // reasoning: "high",
+  deployed: {
+    authorize: ({ principal }) => principal?.principalId === "trusted-editor",
+    repository: "acme/agents",
+    directory: "apps/support",
+    baseBranch: "main",
+    github: { connector: "github/agent-author" },
+  },
 });
 ```
+
+The extension contributes two children with distinct source trees:
+`self-modification__agent` (local) and `self-modification__deployed`. Each dynamic
+resolver returns `null` outside its mode, so the root agent sees at most one:
+`eve dev` offers only the local child; other runtimes offer the deployed child when
+`deployed` is configured and `authorize` allows the caller. A single mount means no
+namespace collision with the bundled development extension, and the TUI and setup
+keep their fixed mount path.
 
 Require an authorization callback, repository, directory (`"."` for the root),
 base branch, and connector. Validate GitHub identifiers and safe relative paths.
@@ -113,8 +123,13 @@ General eve-code credential helpers can remain available to other consumers.
 Selfmod derives and wires the child, code mount, sandbox, and credential broker.
 Consumers do not repeat the same repository context in agent, sandbox, and
 extension files. Keep model and reasoning overrides; avoid exposing every eve-code option through
-selfmod. The existing setup flow may offer local or deployed installation, but it
-must scaffold the corresponding distinct import and configuration.
+selfmod. Setup writes the `deployed` option into a generated mount; when the mount
+contains authored settings it provisions the connector and prints the option to
+merge rather than rewriting the file.
+
+Sandbox modules are evaluated by `eve build` and `eve dev`, so the deployed child's
+sandbox must not throw at import. Outside deployed mode, or on hosts without Vercel
+Sandbox or microsandbox, it binds an inert environment and fails when opened.
 
 ## Ownership and lifecycle
 
@@ -156,7 +171,7 @@ may be internal wiring, but do not expose a partially secured deployed product.
 1. Extract the local-only extension configuration and contributions from the
    environment-switching implementation. Preserve local mounts, registry/TUI
    integration, trace tools, model inheritance, and bundled development behavior.
-2. Define the new deployed configuration and package export. Use separate child
+2. Define the new `deployed` option on the existing mount. Use separate child
    source trees so local tools and instructions cannot leak into the deployed child.
 3. Add a packaged discovery/compilation test for a contributed child that mounts
    `eve/extensions/code`, including its read-only worker and parent-sandbox binding.

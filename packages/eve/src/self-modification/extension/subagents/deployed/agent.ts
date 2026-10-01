@@ -7,6 +7,8 @@ import {
 } from "eve";
 
 import { DEFAULT_AGENT_MODEL_ID } from "#shared/default-agent-model.js";
+
+import { resolveActiveDeployedConfig } from "../../../config.js";
 import selfModification from "../../extension.js";
 
 /** Delegates repository changes without exposing coding tools to the parent. */
@@ -22,16 +24,14 @@ export default deployedSelfModificationAgent;
 
 async function resolve(_event: unknown, ctx: DynamicResolveContext) {
   const config = selfModification.config;
-  try {
-    if (
-      (await config.authorize({ channel: ctx.channel, principal: ctx.session.auth.current })) !==
-      true
-    ) {
-      return null;
-    }
-  } catch {
-    return null;
-  }
+  const deployed = resolveActiveDeployedConfig(config);
+  if (deployed === undefined) return null;
+  // A throwing policy propagates so the resolver lifecycle logs it and omits the child.
+  const allowed = await deployed.authorize({
+    channel: ctx.channel,
+    principal: ctx.session.auth.current,
+  });
+  if (allowed !== true) return null;
   return defineAgent({
     description: [
       "Delegate here when the user asks to investigate or change this eve agent, its tools, skills, instructions, integrations, or other authored source in the configured repository.",

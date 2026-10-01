@@ -13,7 +13,8 @@ import type { VercelProjectReference } from "#setup/project-resolution.js";
 
 import {
   isBranchName,
-  isGitHubRepositoryPart,
+  isGitHubOwner,
+  isGitHubRepositoryName,
   isRepositoryRelativeDirectory,
 } from "./deployed/config-schema.js";
 
@@ -61,12 +62,9 @@ export function connectorName(owner: string, repo: string): string {
   return `selfmod-${owner}-${repo}`.toLowerCase().replaceAll(/[^a-z0-9-]/gu, "-");
 }
 
-export function renderSelfModificationConfig(values?: SelfModificationSetupValues): string {
-  if (values === undefined) return DEFAULT_EXTENSION;
-
-  const body = `import selfModification from "eve/self-modification/deployed";
-
-export default selfModification({
+/** Renders the `deployed` option for an existing selfModification({...}) call. */
+export function renderDeployedSelfModificationBlock(values: SelfModificationSetupValues): string {
+  return `deployed: {
   // Allows every caller to delegate source changes. Replace with a custom policy
   // that checks the caller's principal and channel (recommended).
   authorize: () => true,
@@ -74,7 +72,19 @@ export default selfModification({
   directory: ${JSON.stringify(values.directory)},
   baseBranch: ${JSON.stringify(values.baseBranch)},
   github: { connector: ${JSON.stringify(values.connector)} },
-});
+},
+`;
+}
+
+export function renderSelfModificationConfig(values?: SelfModificationSetupValues): string {
+  if (values === undefined) return DEFAULT_EXTENSION;
+
+  const body = `import selfModification from "eve/self-modification";
+
+export default selfModification({
+  // model: "provider/model",
+  // reasoning: "high",
+${renderDeployedSelfModificationBlock(values).replace(/^(?=.)/gmu, "  ")}});
 `;
   return `${GENERATED_MARKER} digest:${createHash("sha256").update(body).digest("hex")}\n${body}`;
 }
@@ -262,10 +272,11 @@ export function repositoryRelativeDirectory(
 ): string {
   return relativePath(repositoryRoot, appRoot).replaceAll("\\", "/") || ".";
 }
-export function repositoryPartError(value: string): string | undefined {
-  return isGitHubRepositoryPart(value)
-    ? undefined
-    : "Enter a valid GitHub owner or repository name.";
+export function repositoryOwnerError(value: string): string | undefined {
+  return isGitHubOwner(value) ? undefined : "Enter a valid GitHub user or organization name.";
+}
+export function repositoryNameError(value: string): string | undefined {
+  return isGitHubRepositoryName(value) ? undefined : "Enter a valid GitHub repository name.";
 }
 export function directoryError(value: string): string | undefined {
   return isRepositoryRelativeDirectory(value)

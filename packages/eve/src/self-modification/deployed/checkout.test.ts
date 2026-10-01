@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { executeGitHubShell } = vi.hoisted(() => ({ executeGitHubShell: vi.fn() }));
 vi.mock("#extensions/code/extension/lib/github-shell.js", () => ({ executeGitHubShell }));
@@ -9,22 +9,19 @@ vi.mock("./github.js", () => ({
     org: "acme",
   }),
 }));
-vi.mock("./extension.js", () => ({
-  default: {
-    config: {
-      authorize: () => true,
-      baseBranch: "main",
-      directory: "apps/weather",
-      github: { connector: "github/agent-author" },
-      repository: "acme/agents",
-    },
-  },
-}));
+const deployed = {
+  authorize: () => true,
+  baseBranch: "main",
+  directory: "apps/weather",
+  github: { connector: "github/agent-author" },
+  repository: "acme/agents",
+};
 
 import type { SandboxSession } from "#shared/sandbox-session.js";
 
 import {
   createDeployedSelfModificationEnvironment,
+  defineDeployedSelfModificationSandbox,
   initializeDeployedCheckout,
   prepareDeployedSelfModificationSandbox,
 } from "./checkout.js";
@@ -51,7 +48,7 @@ describe("deployed checkout initialization", () => {
   });
 
   it("clones through the scoped credential lease before creating and validating the checkout", async () => {
-    await initializeDeployedCheckout(sandbox, "child-1");
+    await initializeDeployedCheckout(sandbox, deployed, "child-1");
 
     expect(executeGitHubShell).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -77,7 +74,7 @@ describe("deployed checkout initialization", () => {
       stderr: "Repository not found",
       stdout: "",
     });
-    await expect(initializeDeployedCheckout(sandbox, "child-1")).rejects.toThrow(
+    await expect(initializeDeployedCheckout(sandbox, deployed, "child-1")).rejects.toThrow(
       "Could not check out configured repository acme/agents (exit 128).",
     );
     expect(run).not.toHaveBeenCalled();
@@ -85,7 +82,7 @@ describe("deployed checkout initialization", () => {
 
   it("rejects an invalid application or agent directory", async () => {
     run.mockResolvedValue({ exitCode: 2, stderr: "", stdout: "" });
-    await expect(initializeDeployedCheckout(sandbox, "child-1")).rejects.toThrow(
+    await expect(initializeDeployedCheckout(sandbox, deployed, "child-1")).rejects.toThrow(
       "verify the configured application directory and agent/ exist inside the checkout",
     );
   });
@@ -97,7 +94,7 @@ describe("deployed self-modification sandbox", () => {
       isMicrosandboxSupported: () => false,
       isDeployedOnVercel: () => true,
     });
-    expect(environment.provider).toBe("vercel");
+    expect(environment?.provider).toBe("vercel");
   });
 
   it("uses microsandbox outside Vercel when it supports mutable network policies", () => {
@@ -105,16 +102,34 @@ describe("deployed self-modification sandbox", () => {
       isMicrosandboxSupported: () => true,
       isDeployedOnVercel: () => false,
     });
-    expect(environment.provider).toBe("microsandbox");
+    expect(environment?.provider).toBe("microsandbox");
   });
 
-  it("rejects providers that cannot safely broker checkout credentials", () => {
-    expect(() =>
-      createDeployedSelfModificationEnvironment({
-        isMicrosandboxSupported: () => false,
-        isDeployedOnVercel: () => false,
-      }),
-    ).toThrow("Vercel Sandbox or a supported microsandbox");
+  const unsupported = { isMicrosandboxSupported: () => false, isDeployedOnVercel: () => false };
+  const savedDev = process.env.EVE_DEV;
+  afterEach(() => {
+    if (savedDev === undefined) delete process.env.EVE_DEV;
+    else process.env.EVE_DEV = savedDev;
+  });
+
+  it("defers an unsupported provider error until the sandbox opens", async () => {
+    delete process.env.EVE_DEV;
+    const selector = defineDeployedSelfModificationSandbox({ deployed }, unsupported);
+    await expect(selector({ session: { id: "child-1" } } as never)).rejects.toThrow(
+      "Vercel Sandbox or a supported microsandbox",
+    );
+  });
+
+  it.each([
+    ["without deployed configuration", {}, undefined],
+    ["during eve dev", { deployed }, "1"],
+  ])("stays inert %s", async (_name, config, dev) => {
+    if (dev === undefined) delete process.env.EVE_DEV;
+    else process.env.EVE_DEV = dev;
+    const selector = defineDeployedSelfModificationSandbox(config, unsupported);
+    await expect(selector({ session: { id: "child-1" } } as never)).rejects.toThrow(
+      "not configured for this runtime",
+    );
   });
 
   it("prepares reusable CLI tooling without checkout contents or credentials", async () => {
@@ -131,11 +146,27 @@ describe("deployed self-modification sandbox", () => {
       },
     });
 
-    expect(commands[0]).toContain("git ripgrep ca-certificates nodejs npm");
+    // The sandbox user cannot write root-owned /usr/local/bin, where corepack shims go.
+    expect(commands[0]).not.toContain("corepack");
+    expect(commands[0]).not.toContain("nodejs");
     expect(commands.join("\n")).toContain("typescript@6.0.3");
     expect(commands.join("\n")).not.toContain("EVE_SELF_MODIFICATION_GITHUB_TOKEN");
     expect(writes).toEqual(
       expect.arrayContaining(["/workspace/.eve-code/gh", "/workspace/.eve-code/diagnostics.cjs"]),
     );
+  });
+
+  it("reports command output when tooling preparation fails", async () => {
+    await expect(
+      prepareDeployedSelfModificationSandbox({
+        resolvePath: (path) => `/workspace/${path}`,
+        run: async () => ({
+          exitCode: 1,
+          stderr: "eve requires rg in the deployed sandbox",
+          stdout: "",
+        }),
+        writeTextFile: async () => {},
+      }),
+    ).rejects.toThrow("eve requires rg in the deployed sandbox");
   });
 });
