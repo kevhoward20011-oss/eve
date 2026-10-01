@@ -1,34 +1,26 @@
 import {
   ROOT_CONTEXT,
-  SpanKind,
   type Context,
-  type Span,
   type SpanContext,
   type Tracer,
   trace,
 } from "#compiled/@opentelemetry/api/index.js";
 
 import type {
-  InstrumentationActionKind,
   InstrumentationActionStartedEvent,
   InstrumentationActionTerminalEvent,
   InstrumentationAttemptScope,
   InstrumentationProviderDefinition,
 } from "#instrumentation/lifecycle.js";
 import { actionIdempotencyKey, attemptIdempotencyKey } from "#instrumentation/lifecycle.js";
-import { agentTraceIdentityAttributes, traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
+import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import { contentAttribute, textContentAttribute } from "#tracing/agent-otel-content.js";
-import { setAgentUsage } from "#tracing/agent-otel-usage.js";
-import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import type { AgentActionTraceState, AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import { normalizeChannelAudience } from "#shared/channel-audience.js";
 import { isSampledTrace } from "#tracing/sampled-trace.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
-import { AGENT_SPAN_NAMES } from "#tracing/agent-span-contract.js";
-import { recordAgentSpanError as recordError } from "#tracing/agent-span-error.js";
-import { startEveSpan } from "#tracing/adapters/eve/span.js";
-import { frameworkAttributes } from "#tracing/core/attributes.js";
+import { bindEveTraceScope, type EveTraceScope } from "#tracing/adapters/eve/scopes.js";
 
 interface AgentActionInstrumentation {
   readonly events: Pick<
@@ -101,54 +93,41 @@ export function createAgentActionInstrumentation(input: {
     const state = await input.stateStore.getAction(event.idempotencyKey);
     if (state === undefined) return;
     try {
-      finishActionSpan(state, event);
+      await finishActionSpan(state, event);
     } finally {
       await input.stateStore.deleteAction(event.idempotencyKey);
       forget(event.idempotencyKey);
     }
   };
 
-  const startSpan = (state: AgentActionTraceState): Span => {
-    const invocation = isAgentInvocation(state.kind);
-    const span = input.idGenerator.withSpanId(state.spanId, () =>
-      startEveSpan({
-        tracer: input.tracer,
+  const startScope = (state: AgentActionTraceState): Promise<EveTraceScope> =>
+    bindEveTraceScope({
+      tracer: input.tracer,
+      idGenerator: input.idGenerator,
+      key: `${state.sessionId}:${state.callId}`,
+      identity: {
+        sessionId: state.sessionId,
+        rootSessionId: state.rootSessionId,
+        traceSessionId: state.traceSessionId,
+        turnId: state.turnId,
+        frameworkVersion: input.frameworkVersion,
+      },
+      parent: contextFromActionState(state),
+      reference: { ...state.parent, spanId: state.spanId },
+      startTimeMs: state.startTimeMs,
+      deferred: true,
+      attempt: { index: state.stepIndex, attempt: state.attemptIndex },
+      data: {
         type: "action",
-        operationId: `${state.sessionId}:${state.callId}`,
-        name: AGENT_SPAN_NAMES.action,
         options: {
-          attributes: {
-            "agent.action.call_id": state.callId,
-            "agent.action.kind": state.kind,
-            "agent.action.name": state.name,
-            ...frameworkAttributes({ name: "eve", version: input.frameworkVersion }),
-            "agent.step.attempt": state.attemptIndex,
-            "agent.step.index": state.stepIndex,
-            "agent.turn.id": state.turnId,
-            ...agentSpanNamingAttributes(AGENT_SPAN_NAMES.action),
-            ...agentTraceIdentityAttributes({
-              rootSessionId: state.rootSessionId,
-              traceSessionId: state.traceSessionId,
-              sessionId: state.sessionId,
-            }),
-            ...(invocation
-              ? {
-                  "gen_ai.agent.name": state.name,
-                  "agent.invocation.role": "caller",
-                }
-              : undefined),
-          },
-          kind: state.kind === "remote-agent-call" ? SpanKind.CLIENT : SpanKind.INTERNAL,
-          startTime: state.startTimeMs,
+          callId: state.callId,
+          kind: state.kind,
+          name: state.name,
+          arguments:
+            state.inputAttribute === undefined ? undefined : JSON.parse(state.inputAttribute),
         },
-        parent: contextFromActionState(state),
-      }),
-    );
-    if (!invocation && state.inputAttribute !== undefined) {
-      span.setAttribute("gen_ai.tool.call.arguments", state.inputAttribute);
-    }
-    return span;
-  };
+      },
+    });
 
   return {
     async contextFor(sessionId, turnId, callId) {
@@ -169,9 +148,8 @@ export function createAgentActionInstrumentation(input: {
       for (const key of keys) {
         const state = await input.stateStore.getAction(key);
         if (state === undefined) continue;
-        const span = startSpan(state);
-        recordError(span, error);
-        span.end();
+        const scope = await startScope(state);
+        await scope.finish({ failed: true, error });
         await input.stateStore.deleteAction(key);
       }
     },
@@ -189,29 +167,37 @@ export function createAgentActionInstrumentation(input: {
     }
   }
 
-  function finishActionSpan(
+  async function finishActionSpan(
     state: AgentActionTraceState,
     event: InstrumentationActionTerminalEvent,
-  ): void {
-    const span = startSpan(state);
-    span.setAttribute("agent.action.outcome", event.outcome);
-    if (event.usage !== undefined) {
-      setAgentUsage(span, event.usage);
-    }
-    if (event.type === "action.failed") {
-      if (event.errorCode !== undefined) {
-        span.setAttribute("agent.action.error.code", event.errorCode);
-      }
-      recordActionError(span, event.error, event.errorCode);
-    } else if (event.output.type === "error") {
-      recordActionError(span, event.output.error);
-    } else {
-      if (input.recordOutputs && !isAgentInvocation(state.kind)) {
-        const result = contentAttribute(event.output.output);
-        if (result !== undefined) span.setAttribute("gen_ai.tool.call.result", result);
-      }
-    }
-    span.end(event.acceptedAtMs);
+  ): Promise<void> {
+    const scope = await startScope(state);
+    const error =
+      event.type === "action.failed"
+        ? event.error
+        : event.output.type === "error"
+          ? event.output.error
+          : undefined;
+    const failed = event.type === "action.failed" || event.output.type === "error";
+    const normalized = normalizeActionError(error);
+    if (
+      normalized instanceof Error &&
+      event.type === "action.failed" &&
+      event.errorCode !== undefined
+    )
+      normalized.name = event.errorCode;
+    await scope.finish({
+      outcome: event.outcome,
+      failed,
+      error: normalized,
+      errorCode: event.type === "action.failed" ? event.errorCode : undefined,
+      usage: event.usage,
+      output:
+        input.recordOutputs && event.type === "action.completed" && event.output.type === "result"
+          ? event.output.output
+          : undefined,
+      endTimeMs: event.acceptedAtMs,
+    });
   }
 }
 
@@ -238,23 +224,16 @@ function contextFromActionState(state: AgentActionTraceState): Context {
   );
 }
 
-function isAgentInvocation(kind: InstrumentationActionKind): boolean {
-  return kind === "subagent-call" || kind === "remote-agent-call";
-}
-
-function recordActionError(span: Span, error: unknown, errorType?: string): void {
+function normalizeActionError(error: unknown): unknown {
   if (error instanceof Error || error === undefined) {
-    recordError(span, error, errorType);
-    return;
+    return error;
   }
   const detail = serializedErrorDetail(error);
   if (detail === undefined) {
-    recordError(span, undefined, errorType);
-    return;
+    return undefined;
   }
   const normalized = new Error(detail);
-  if (errorType !== undefined) normalized.name = errorType;
-  recordError(span, normalized, errorType);
+  return normalized;
 }
 
 function serializedErrorDetail(error: unknown): string | undefined {

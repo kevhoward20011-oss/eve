@@ -9,8 +9,16 @@ import { createTraceEngine } from "#tracing/core/engine.js";
 import { liveOtelBackend } from "#tracing/adapters/otel.js";
 import { eveOutputMapping } from "#tracing/adapters/eve/compatibility.js";
 import type { SpanType, TraceLink } from "#tracing/core/types.js";
+import { channelRequestMetadata, applyAttributes } from "#tracing/core/contract.js";
 
 type SpanOptions = NonNullable<Parameters<Tracer["startSpan"]>[1]>;
+
+export function annotateChannelRequest(
+  span: Span,
+  input: { channelName?: string; channelKind?: string },
+): void {
+  applyAttributes(span, channelRequestMetadata(input));
+}
 
 /** Keeps eve's full parent context while the shared engine creates and maps the span. */
 export function startEveSpan(input: {
@@ -20,6 +28,7 @@ export function startEveSpan(input: {
   readonly name: string;
   readonly options?: SpanOptions;
   readonly parent?: Context;
+  readonly links?: readonly TraceLink[];
 }): Span {
   let recorded: Span | undefined;
   const tracer = {
@@ -41,20 +50,6 @@ export function startEveSpan(input: {
     },
   } as Tracer;
   const engine = createTraceEngine({ backend: liveOtelBackend(tracer, eveOutputMapping()) });
-  const links: TraceLink[] = [];
-  for (const link of input.options?.links ?? []) {
-    const relationship = link.attributes?.["eve.link.type"];
-    if (
-      relationship === "agent.dispatch" ||
-      relationship === "channel.request" ||
-      relationship === "workflow.delivery"
-    ) {
-      links.push({
-        context: link.context,
-        relationship: relationship === "workflow.delivery" ? "execution.delivery" : relationship,
-      });
-    }
-  }
   const operation = engine.start(
     {
       type: input.type,
@@ -70,7 +65,7 @@ export function startEveSpan(input: {
               : "INTERNAL",
       root: input.options?.root,
       attributes: input.options?.attributes ?? {},
-      links,
+      links: input.links,
       startTimeMs:
         typeof input.options?.startTime === "number" ? input.options.startTime : undefined,
     },

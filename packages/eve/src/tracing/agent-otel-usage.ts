@@ -3,6 +3,7 @@ import type { Span } from "#compiled/@opentelemetry/api/index.js";
 import type { InstrumentationUsage } from "#instrumentation/lifecycle.js";
 import type { AgentTurnTraceState } from "#tracing/agent-trace-state.js";
 import { usageAttributes } from "#tracing/core/attributes.js";
+import { gatewayCostAttributes } from "#tracing/core/gateway.js";
 
 /** Applies eve's structural token usage attributes to an agent span. */
 export function setAgentUsage(span: Span, usage: InstrumentationUsage): void {
@@ -32,18 +33,20 @@ export function readGatewayCost(
 ): Record<string, string | number> | undefined {
   const gateway = providerMetadata.gateway;
   if (!isRecord(gateway)) return undefined;
-  const attributes: Record<string, string | number> = {};
-  const cost = readUsd(gateway.cost);
-  if (cost !== undefined) attributes["gen_ai.usage.cost"] = cost;
-  const gatewayCost = readUsd(gateway.gatewayCost);
-  if (gatewayCost !== undefined) attributes["gen_ai.usage.gateway_cost"] = gatewayCost;
-  const inputCost = readUsd(gateway.inputInferenceCost);
-  if (inputCost !== undefined) attributes["gen_ai.usage.input_cost"] = inputCost;
-  const outputCost = readUsd(gateway.outputInferenceCost);
-  if (outputCost !== undefined) attributes["gen_ai.usage.output_cost"] = outputCost;
-  if (typeof gateway.generationId === "string" && gateway.generationId.length > 0) {
-    attributes["gen_ai.generation.id"] = gateway.generationId;
-  }
+  const attributes = Object.fromEntries(
+    Object.entries(
+      gatewayCostAttributes({
+        cost: readUsd(gateway.cost),
+        gatewayCost: readUsd(gateway.gatewayCost),
+        inputCost: readUsd(gateway.inputInferenceCost),
+        outputCost: readUsd(gateway.outputInferenceCost),
+        generationId:
+          typeof gateway.generationId === "string" && gateway.generationId.length > 0
+            ? gateway.generationId
+            : undefined,
+      }),
+    ).filter(([, value]) => value !== undefined),
+  ) as Record<string, string | number>;
   return Object.keys(attributes).length === 0 ? undefined : attributes;
 }
 

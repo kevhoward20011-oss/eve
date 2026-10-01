@@ -1,6 +1,5 @@
 import {
   ROOT_CONTEXT,
-  SpanKind,
   type Context,
   type Attributes,
   type Span,
@@ -15,15 +14,13 @@ import type {
   InstrumentationToolCallTerminalEvent,
 } from "#instrumentation/lifecycle.js";
 import { actionIdempotencyKey } from "#instrumentation/lifecycle.js";
-import { contentAttribute } from "#tracing/agent-otel-content.js";
-import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
-import { agentTraceIdentityAttributes, traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
+import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";
 import { recordAgentSpanError as recordError } from "#tracing/agent-span-error.js";
 import { withAgentToolSpanContext } from "#tracing/agent-tool-span-context.js";
-import { startEveSpan } from "#tracing/adapters/eve/span.js";
+import { bindEveTraceScope, type EveTraceScope } from "#tracing/adapters/eve/scopes.js";
 
 interface ToolSpanState {
   readonly actionKey: string;
@@ -37,6 +34,7 @@ interface ToolSpanState {
   readonly startTimeMs: number;
   finished?: true;
   span?: Span;
+  scope?: EveTraceScope;
   terminal?: InstrumentationToolCallTerminalEvent;
   pendingError?: { readonly error: unknown; readonly errorType?: string };
 }
@@ -44,7 +42,7 @@ interface ToolSpanState {
 interface AgentToolInstrumentation {
   actionStarted(event: InstrumentationActionStartedEvent): Promise<void>;
   contextFor(attemptId: string, idempotencyKey: string): Context | undefined;
-  drain(attemptId: string, failure?: { readonly error: unknown }): void;
+  drain(attemptId: string, failure?: { readonly error: unknown }): Promise<void>;
   readonly events: {
     readonly "tool.call.completed": (event: InstrumentationToolCallTerminalEvent) => Promise<void>;
     readonly "tool.call.failed": (event: InstrumentationToolCallTerminalEvent) => Promise<void>;
@@ -83,7 +81,7 @@ export function createAgentToolInstrumentation(input: {
       if (actionParent === undefined) return;
       state = reserve(event, actionKey, actionParent);
     }
-    if (actionParent !== undefined) startSpan(state, actionParent.context);
+    if (actionParent !== undefined) await startSpan(state, actionParent.context);
   };
 
   const onTerminal = async (event: InstrumentationToolCallTerminalEvent): Promise<void> => {
@@ -97,9 +95,9 @@ export function createAgentToolInstrumentation(input: {
         state.event.scope.turnId,
         state.event.callId,
       );
-      if (actionParent !== undefined) startSpan(state, actionParent.context);
+      if (actionParent !== undefined) await startSpan(state, actionParent.context);
     }
-    finishIfReady(state);
+    await finishIfReady(state);
   };
 
   return {
@@ -112,18 +110,18 @@ export function createAgentToolInstrumentation(input: {
         event.callId,
       );
       if (actionParent === undefined) return;
-      startSpan(state, actionParent.context);
-      finishIfReady(state);
+      await startSpan(state, actionParent.context);
+      await finishIfReady(state);
     },
     contextFor: (attemptId, idempotencyKey) =>
       byAttempt.get(attemptId)?.get(idempotencyKey)?.context,
-    drain(attemptId, failure) {
+    async drain(attemptId, failure) {
       const states = byAttempt.get(attemptId);
       if (states === undefined) return;
       for (const state of states.values()) {
         if (state.finished === true) continue;
-        if (state.span === undefined) startSpan(state, state.fallbackParent);
-        finish(state, failure);
+        if (state.span === undefined) await startSpan(state, state.fallbackParent);
+        await finish(state, failure);
       }
       byAttempt.delete(attemptId);
     },
@@ -188,77 +186,79 @@ export function createAgentToolInstrumentation(input: {
     return state;
   }
 
-  function startSpan(state: ToolSpanState, parent: Context): void {
+  async function startSpan(state: ToolSpanState, parent: Context): Promise<void> {
     if (state.span !== undefined || state.finished === true) return;
-    state.span = input.idGenerator.withSpanId(state.spanId, () =>
-      startEveSpan({
-        tracer: input.tracer,
+    state.scope = await bindEveTraceScope({
+      tracer: input.tracer,
+      idGenerator: input.idGenerator,
+      key: state.idempotencyKey,
+      parent,
+      startTimeMs: state.startTimeMs,
+      reference: { ...trace.getSpan(parent)!.spanContext(), spanId: state.spanId },
+      identity: {
+        sessionId: state.event.scope.sessionId,
+        rootSessionId: state.event.scope.rootSessionId ?? state.event.scope.sessionId,
+        traceSessionId: traceSessionIdOf(state.event.scope),
+        turnId: state.event.scope.turnId,
+        agentName: state.event.scope.functionId,
+        frameworkVersion: "",
+      },
+      data: {
         type: "tool",
-        operationId: state.idempotencyKey,
-        name: `execute_tool ${state.event.toolName}`,
         options: {
-          attributes: { ...toolAttributes(state.event), ...state.additionalAttributes },
-          kind: SpanKind.INTERNAL,
-          startTime: state.startTimeMs,
+          callId: state.event.callId,
+          name: state.event.toolName,
+          arguments: input.recordInputs ? state.event.input : undefined,
         },
-        parent,
-      }),
-    );
+      },
+    });
+    state.span = state.scope.span;
+    for (const [name, value] of Object.entries(state.additionalAttributes))
+      if (value !== undefined) state.span.setAttribute(name, value);
     if (state.pendingError !== undefined) {
-      recordError(state.span, state.pendingError.error, state.pendingError.errorType);
-    }
-    if (input.recordInputs) {
-      const args = contentAttribute(state.event.input);
-      if (args !== undefined) state.span.setAttribute("gen_ai.tool.call.arguments", args);
+      state.scope.runtime.error(state.pendingError.error, state.pendingError.errorType);
     }
   }
 
-  function finishIfReady(state: ToolSpanState): void {
+  async function finishIfReady(state: ToolSpanState): Promise<void> {
     if (state.span === undefined || state.terminal === undefined) return;
-    finish(state);
+    await finish(state);
   }
 
-  function finish(state: ToolSpanState, failure?: { readonly error: unknown }): void {
+  async function finish(
+    state: ToolSpanState,
+    failure?: { readonly error: unknown },
+  ): Promise<void> {
     const span = state.span;
     if (span === undefined || state.finished === true) return;
     state.finished = true;
     const terminal = state.terminal;
-    if (failure !== undefined) {
-      recordError(span, failure.error);
-    } else if (terminal?.type === "tool.call.failed") {
-      recordError(span, terminal.error);
-    } else if (terminal?.output.type === "error") {
-      recordError(span, terminal.output.error);
-    } else if (terminal !== undefined && input.recordOutputs) {
-      const result = contentAttribute(terminal.output.output);
-      if (result !== undefined) span.setAttribute("gen_ai.tool.call.result", result);
-    }
-    span.end();
+    const failed =
+      failure !== undefined ||
+      terminal?.type === "tool.call.failed" ||
+      terminal?.output.type === "error";
+    const error =
+      failure?.error ??
+      (terminal?.type === "tool.call.failed"
+        ? terminal.error
+        : terminal?.output.type === "error"
+          ? terminal.output.error
+          : undefined);
+    await state.scope?.finish({
+      failed,
+      error,
+      output:
+        input.recordOutputs &&
+        terminal?.type === "tool.call.completed" &&
+        terminal.output.type === "result"
+          ? terminal.output.output
+          : undefined,
+    });
     byAction.delete(state.actionKey);
     const states = byAttempt.get(state.attemptId);
     states?.delete(state.idempotencyKey);
     if (states?.size === 0) byAttempt.delete(state.attemptId);
   }
-}
-
-function toolAttributes(
-  event: InstrumentationToolCallStartedEvent,
-): Record<string, string | number> {
-  return {
-    ...(event.scope.functionId === undefined
-      ? {}
-      : { "gen_ai.agent.name": event.scope.functionId }),
-    "gen_ai.operation.name": "execute_tool",
-    "gen_ai.tool.call.id": event.callId,
-    "gen_ai.tool.name": event.toolName,
-    "gen_ai.tool.type": "function",
-    ...agentSpanNamingAttributes(`execute_tool ${event.toolName}`, "execute_tool"),
-    ...agentTraceIdentityAttributes({
-      rootSessionId: event.scope.rootSessionId ?? event.scope.sessionId,
-      traceSessionId: traceSessionIdOf(event.scope),
-      sessionId: event.scope.sessionId,
-    }),
-  };
 }
 
 function contextFromSpanContext(spanContext: SpanContext): Context {

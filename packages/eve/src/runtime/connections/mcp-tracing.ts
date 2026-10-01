@@ -23,6 +23,14 @@ import { truncateTelemetryText } from "#tracing/telemetry-budget.js";
 import { replaceBaggageMember } from "#protocol/baggage.js";
 import { isObject } from "#shared/guards.js";
 import { startEveSpan } from "#tracing/adapters/eve/span.js";
+import {
+  mcpAttributes,
+  mcpName,
+  mcpSessionAttributes,
+  rpcStatusAttributes,
+  CONTENT_FIELDS,
+} from "#tracing/core/contract.js";
+import { eveOutputMapping } from "#tracing/adapters/eve/compatibility.js";
 
 const MAX_MCP_TRACE_REQUEST_BYTES = 1024 * 1024;
 const MAX_MCP_TRACE_CONTEXT_BYTES = 8192;
@@ -79,7 +87,7 @@ export function createMcpTraceFetch(input: {
       const sessionId = response.headers.get("mcp-session-id");
       if (sessionId !== null) {
         annotateAgentToolSpan(
-          { "mcp.session.id": truncateTelemetryText(sessionId, 512) },
+          mcpSessionAttributes(truncateTelemetryText(sessionId, 512)),
           activeContext,
         );
       }
@@ -127,7 +135,7 @@ export async function withMcpToolsListSpan<T>(input: {
     tracer: trace.getTracer("eve.mcp"),
     type: "mcp",
     operationId: `${input.connectionName}:tools/list`,
-    name: "tools/list",
+    name: mcpName("tools/list"),
     options: {
       attributes,
       kind: SpanKind.CLIENT,
@@ -149,7 +157,7 @@ export async function withMcpToolsListSpan<T>(input: {
       } catch (error) {
         const code = jsonRpcErrorCode(error);
         if (code !== undefined) {
-          annotateAgentToolSpan({ "rpc.response.status_code": code }, spanContext);
+          annotateAgentToolSpan(rpcStatusAttributes(code), spanContext);
         }
         recordAgentToolSpanError(error, errorType(error, code), spanContext);
         throw error;
@@ -179,7 +187,7 @@ export async function withMcpToolCallSpan<T>(input: {
     tracer: trace.getTracer("eve.mcp"),
     type: "mcp",
     operationId: `${input.connectionName}:tools/call:${input.toolName}`,
-    name: `tools/call ${truncateTelemetryText(input.toolName, 128)}`,
+    name: mcpName("tools/call", truncateTelemetryText(input.toolName, 128)),
     options: {
       attributes: mcpToolCallAttributes(input),
       kind: SpanKind.CLIENT,
@@ -216,7 +224,7 @@ function runMcpToolCall<T>(
   if (fallbackSpan !== undefined && policy.recordInputs) {
     const argumentsAttribute = contentAttribute(input.arguments);
     if (argumentsAttribute !== undefined) {
-      fallbackSpan.setAttribute("gen_ai.tool.call.arguments", argumentsAttribute);
+      fallbackSpan.setAttribute(CONTENT_FIELDS.toolArguments, argumentsAttribute);
     }
   }
 
@@ -229,7 +237,7 @@ function runMcpToolCall<T>(
       if (fallbackSpan !== undefined && policy.recordOutputs) {
         const resultAttribute = contentAttribute(result);
         if (resultAttribute !== undefined) {
-          fallbackSpan.setAttribute("gen_ai.tool.call.result", resultAttribute);
+          fallbackSpan.setAttribute(CONTENT_FIELDS.toolResult, resultAttribute);
         }
       }
       return result;
@@ -237,7 +245,7 @@ function runMcpToolCall<T>(
     .catch((error: unknown) => {
       const code = jsonRpcErrorCode(error);
       if (code !== undefined) {
-        annotateAgentToolSpan({ "rpc.response.status_code": code }, context);
+        annotateAgentToolSpan(rpcStatusAttributes(code), context);
       }
       if (fallbackSpan !== undefined) {
         recordAgentToolSpanError(error, errorType(error, code), context);
@@ -269,32 +277,28 @@ function mcpRequestAttributes(input: {
 }): Attributes {
   const method = input.method ?? input.message?.method;
   const params = input.params ?? (isObject(input.message?.params) ? input.message.params : {});
-  const attributes: Attributes = {
-    "eve.connection.name": input.connectionName,
-    "mcp.method.name": method ?? "unknown",
-    "network.protocol.name": "http",
-    "network.transport": "tcp",
-  };
   const toolName =
     input.toolName ?? (typeof params["name"] === "string" ? params["name"] : undefined);
-  if (method === "tools/call") {
-    attributes["gen_ai.operation.name"] = "execute_tool";
-    if (toolName !== undefined) attributes["gen_ai.tool.name"] = toolName;
-  }
   const requestId = input.message?.id;
-  if (typeof requestId === "number" || typeof requestId === "string") {
-    attributes["jsonrpc.request.id"] = String(requestId);
-  }
   const meta = params["_meta"];
   const protocolVersion =
     input.protocolVersion ??
     (isObject(meta) && typeof meta["io.modelcontextprotocol/protocolVersion"] === "string"
       ? meta["io.modelcontextprotocol/protocolVersion"]
       : undefined);
-  if (protocolVersion !== undefined) {
-    attributes["mcp.protocol.version"] = protocolVersion;
-  }
-  return attributes;
+  return eveOutputMapping().attributes(
+    { type: "mcp", operationId: input.connectionName },
+    mcpAttributes({
+      connectionName: input.connectionName,
+      method: method ?? "unknown",
+      toolName,
+      protocolVersion,
+      requestId:
+        typeof requestId === "number" || typeof requestId === "string"
+          ? String(requestId)
+          : undefined,
+    }),
+  );
 }
 
 interface JsonRpcRequest extends Record<string, unknown> {

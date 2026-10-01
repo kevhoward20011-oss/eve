@@ -1,11 +1,14 @@
 import type { AgentSessionTraceState, AgentTurnTraceState } from "#tracing/agent-trace-state.js";
 import type { InstrumentationStepAttemptStartedEvent } from "#instrumentation/lifecycle.js";
-import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
-import { agentInvocationSpanName } from "#tracing/agent-span-contract.js";
 import { agentTraceIdentityAttributes, traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import { normalizeInstrumentationChannelKind } from "#internal/instrumentation.js";
 import { runtimeContextAttributes as traceRuntimeContextAttributes } from "#tracing/core/attributes.js";
-import { frameworkAttributes } from "#tracing/core/attributes.js";
+import {
+  activationAttributes,
+  stepAttributes,
+  channelAttributes,
+  principalAttributes,
+} from "#tracing/core/contract.js";
 
 type SpanAttributePrimitive = string | number | boolean;
 type SpanAttributeValue = SpanAttributePrimitive | SpanAttributePrimitive[];
@@ -24,51 +27,86 @@ export function agentActivationAttributes(input: {
   const parentLineage = input.turn.parentLineage ?? input.session?.parentLineage;
   const isSubagent = parentLineage !== undefined;
   const ownsSessionMetadata = !isSubagent || input.turn.traceSessionId === input.sessionId;
-  const channelClassification = agentChannelClassificationAttributes(
-    input.session,
-    input.turn,
-    input.sessionId,
-  );
+  const channelClassification = agentChannelMetadata(input.session, input.turn, input.sessionId);
   const scheduleId = isSubagent ? undefined : input.session?.scheduleId;
-  return {
-    ...frameworkAttributes({ name: "eve", version: input.frameworkVersion }),
-    "agent.name": input.agentName,
-    "agent.channel.audience": input.session?.channelAudience,
-    ...agentPrincipalAttributes(input.turn),
-    "agent.channel.delivery.id": input.turn.channelDelivery?.deliveryId,
-    "agent.channel.delivery.input": input.turn.channelDelivery?.inputAttribute,
-    ...channelClassification,
-    "agent.channel.name": input.turn.channelDelivery?.channelName,
-    "agent.channel.request.id": input.turn.channelDelivery?.requestId,
-    "agent.parent_call.id": parentLineage?.callId,
-    "agent.parent_run.id": parentLineage?.sessionId,
-    "agent.run.type": isSubagent ? "subagent" : "session",
-    "agent.schedule.id": scheduleId,
-    "agent.session.title": ownsSessionMetadata && recordsInputs ? input.session?.title : undefined,
-    "agent.subagent.name": input.turn.subagentName,
-    "agent.trace.content.input": recordsInputs,
-    "agent.trace.content.output": recordsOutputs,
-    "agent.turn.id": input.turnId,
-    "agent.turn.sequence": input.turn.sequence,
-    "gen_ai.agent.name": input.agentName,
-    "gen_ai.operation.name": "invoke_agent",
-    ...agentSpanNamingAttributes(agentInvocationSpanName(input.agentName), "invoke_agent"),
-    ...agentTraceIdentityAttributes({
+  return activationAttributes({
+    framework: { name: "eve", version: input.frameworkVersion },
+    agentName: input.agentName,
+    channel: channelClassification,
+    audience: input.session?.channelAudience,
+    currentPrincipal: input.turn.currentPrincipal,
+    initiatorPrincipal: input.turn.initiatorPrincipal,
+    delivery:
+      input.turn.channelDelivery === undefined
+        ? undefined
+        : {
+            id: input.turn.channelDelivery.deliveryId,
+            input: input.turn.channelDelivery.inputAttribute,
+            channelName: input.turn.channelDelivery.channelName,
+            requestId: input.turn.channelDelivery.requestId,
+          },
+    parentCallId: parentLineage?.callId,
+    parentRunId: parentLineage?.sessionId,
+    subagent: isSubagent,
+    scheduleId,
+    title: ownsSessionMetadata && recordsInputs ? input.session?.title : undefined,
+    subagentName: input.turn.subagentName,
+    recordInputs: recordsInputs,
+    recordOutputs: recordsOutputs,
+    turnId: input.turnId,
+    sequence: input.turn.sequence,
+    identity: agentTraceIdentityAttributes({
       rootSessionId: input.turn.rootSessionId,
       traceSessionId: input.turn.traceSessionId,
       sessionId: input.sessionId,
     }),
+  }) as Record<string, string | number | boolean | undefined>;
+}
+
+export function agentActivationMetadata(input: {
+  readonly session?: AgentSessionTraceState;
+  readonly turn: AgentTurnTraceState;
+  readonly sessionId: string;
+}): import("#tracing/core/scopes.js").TurnMetadata {
+  const { session, turn, sessionId } = input;
+  const lineage = turn.parentLineage ?? session?.parentLineage;
+  const owns = lineage === undefined || turn.traceSessionId === sessionId;
+  const delivery = turn.channelDelivery;
+  return {
+    sequence: turn.sequence,
+    subagent: lineage !== undefined,
+    subagentName: turn.subagentName,
+    parentCallId: lineage?.callId,
+    parentRunId: lineage?.sessionId,
+    channel: agentChannelMetadata(session, turn, sessionId),
+    audience: session?.channelAudience,
+    title:
+      owns && session?.decision?.action === "record" && session.decision.recordInputs
+        ? session.title
+        : undefined,
+    scheduleId: lineage === undefined ? session?.scheduleId : undefined,
+    currentPrincipal: turn.currentPrincipal,
+    initiatorPrincipal: turn.initiatorPrincipal,
+    delivery:
+      delivery === undefined
+        ? undefined
+        : {
+            id: delivery.deliveryId,
+            channelName: delivery.channelName,
+            requestId: delivery.requestId,
+            input:
+              delivery.inputAttribute === undefined
+                ? undefined
+                : JSON.parse(delivery.inputAttribute),
+          },
   };
 }
 
-export function agentChannelClassificationAttributes(
+function agentChannelMetadata(
   session: AgentSessionTraceState | undefined,
   turn: AgentTurnTraceState,
   sessionId: string,
-): {
-  readonly "agent.channel.kind": string | undefined;
-  readonly "agent.session.origin": string | undefined;
-} {
+) {
   const isSubagent = (turn.parentLineage ?? session?.parentLineage) !== undefined;
   const ownsSessionMetadata = !isSubagent || turn.traceSessionId === sessionId;
   const channelKind =
@@ -85,10 +123,15 @@ export function agentChannelClassificationAttributes(
       : session?.scheduleId !== undefined
         ? "schedule"
         : "channel";
-  return {
-    "agent.channel.kind": channelKind,
-    "agent.session.origin": origin,
-  };
+  return { kind: channelKind, origin };
+}
+
+export function agentChannelClassificationAttributes(
+  session: AgentSessionTraceState | undefined,
+  turn: AgentTurnTraceState,
+  sessionId: string,
+) {
+  return channelAttributes(agentChannelMetadata(session, turn, sessionId));
 }
 
 export function agentStepAttributes(input: {
@@ -98,38 +141,30 @@ export function agentStepAttributes(input: {
   readonly turn: AgentTurnTraceState;
 }) {
   const { event, session, turn } = input;
-  const channelClassification = agentChannelClassificationAttributes(
-    session,
-    turn,
-    event.scope.sessionId,
-  );
-  return {
-    ...frameworkAttributes({ name: "eve", version: input.frameworkVersion }),
-    "agent.step.attempt": event.scope.attemptIndex,
-    "agent.step.index": event.scope.stepIndex,
-    "agent.turn.id": event.scope.turnId,
-    "agent.name": event.scope.functionId,
-    // Leave an unresolved kind open for a later delivery to classify.
-    ...(channelClassification["agent.channel.kind"] === "unknown"
-      ? undefined
-      : channelClassification),
-    ...agentSpanNamingAttributes("agent.step"),
-    ...agentTraceIdentityAttributes({
+  const channelClassification = agentChannelMetadata(session, turn, event.scope.sessionId);
+  return stepAttributes({
+    framework: { name: "eve", version: input.frameworkVersion },
+    attempt: {
+      turnId: event.scope.turnId,
+      index: event.scope.stepIndex,
+      attempt: event.scope.attemptIndex,
+    },
+    agentName: event.scope.functionId,
+    channel: channelClassification,
+    runtimeContext: event.runtimeContext,
+    identity: agentTraceIdentityAttributes({
       rootSessionId: event.scope.rootSessionId ?? event.scope.sessionId,
       traceSessionId: traceSessionIdOf(event.scope),
       sessionId: event.scope.sessionId,
     }),
-    ...runtimeContextAttributes(event.runtimeContext),
-  };
+  });
 }
 
 export function agentPrincipalAttributes(turn: AgentTurnTraceState): Record<string, string> {
-  const attributes: Record<string, string> = {};
-  setOptionalAttribute(attributes, "agent.principal.current.id", turn.currentPrincipal?.id);
-  setOptionalAttribute(attributes, "agent.principal.current.type", turn.currentPrincipal?.type);
-  setOptionalAttribute(attributes, "agent.principal.initiator.id", turn.initiatorPrincipal?.id);
-  setOptionalAttribute(attributes, "agent.principal.initiator.type", turn.initiatorPrincipal?.type);
-  return attributes;
+  return principalAttributes({
+    current: turn.currentPrincipal,
+    initiator: turn.initiatorPrincipal,
+  });
 }
 
 /** Flattens merged runtime context into AI SDK-compatible span attributes. */
@@ -141,12 +176,4 @@ export function runtimeContextAttributes(
     if (value !== undefined) attributes[key] = value as SpanAttributeValue;
   }
   return attributes;
-}
-
-function setOptionalAttribute(
-  attributes: Record<string, string>,
-  key: string,
-  value: string | undefined,
-): void {
-  if (value !== undefined) attributes[key] = value;
 }

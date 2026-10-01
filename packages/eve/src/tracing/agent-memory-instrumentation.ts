@@ -1,10 +1,8 @@
 import {
   ROOT_CONTEXT,
-  SpanKind,
   context,
   trace,
   type Context,
-  type Span,
   type Tracer,
 } from "#compiled/@opentelemetry/api/index.js";
 
@@ -22,20 +20,17 @@ import {
   applyLiveDeliveryAudienceCeiling,
   resolveForwardedTraceSeed,
 } from "#shared/forwarded-trace-policy.js";
-import { genAiMemoryRecordsAttribute } from "#tracing/agent-otel-content.js";
-import { agentTraceIdentityAttributes, traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
+import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import { isAgentTraceContext, markAgentTraceContext } from "#tracing/agent-trace-context.js";
-import { recordAgentSpanError } from "#tracing/agent-span-error.js";
-import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
 import type { AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import { withErrorContent } from "#tracing/error-content-context.js";
 import { isSampledTrace } from "#tracing/sampled-trace.js";
 import { suppressTracing } from "#tracing/suppress-tracing.js";
 import type { ConversationEnvironment } from "#shared/conversation-context.js";
-import { startEveSpan } from "#tracing/adapters/eve/span.js";
+import { bindEveTraceScope, type EveTraceScope } from "#tracing/adapters/eve/scopes.js";
 
-type SpanState = { readonly context: Context; readonly span: Span };
+type SpanState = EveTraceScope & { readonly context: Context };
 
 interface AgentMemoryInstrumentation {
   readonly events: Pick<
@@ -80,29 +75,43 @@ export function createAgentMemoryInstrumentation(input: {
     const parent = await parentContext(event);
     const parentSpan = parent === undefined ? undefined : trace.getSpan(parent)?.spanContext();
     if (parent === undefined || parentSpan === undefined || !isSampledTrace(parentSpan)) return;
-    const span = startEveSpan({
+    const bound = await bindEveTraceScope({
       tracer: input.tracer,
-      type: "memory",
-      operationId: event.idempotencyKey,
-      name: event.operationName,
-      options: {
-        attributes: memorySpanAttributes(event),
-        kind: SpanKind.CLIENT,
-      },
+      key: event.idempotencyKey,
       parent,
+      identity: {
+        sessionId: event.sessionId,
+        rootSessionId: event.rootSessionId,
+        traceSessionId: traceSessionIdOf(event),
+        turnId: event.turnId ?? "",
+        frameworkVersion: "",
+      },
+      data: {
+        type: "memory",
+        options: {
+          operation: event.operationName,
+          phase: event.phase,
+          slot: event.slot,
+          storeId: event.storeId,
+        },
+      },
     });
+    const span = bound.span;
     spans.set(event.idempotencyKey, {
       context: trace.setSpan(parent, span),
-      span,
+      ...bound,
     });
   };
 
-  const onTerminal = (event: InstrumentationMemoryOperationTerminalEvent): void => {
+  const onTerminal = async (event: InstrumentationMemoryOperationTerminalEvent): Promise<void> => {
     const state = spans.get(event.idempotencyKey);
     if (state === undefined) return;
     spans.delete(event.idempotencyKey);
-    updateMemorySpan(state.span, event);
-    state.span.end();
+    await state.finish(
+      event.type === "memory.operation.failed"
+        ? { failed: true, error: event.error }
+        : { recordCount: event.recordCount, records: event.outputRecords },
+    );
   };
 
   return {
@@ -155,39 +164,6 @@ export function createAgentMemoryInstrumentation(input: {
           );
     },
   };
-}
-
-function memorySpanAttributes(
-  event: InstrumentationMemoryOperationEvent,
-): Record<string, string | number> {
-  const attributes: Record<string, string | number> = {
-    "agent.memory.phase": event.phase,
-    "agent.memory.slot": event.slot,
-    "gen_ai.memory.store.id": event.storeId,
-    "gen_ai.operation.name": event.operationName,
-    ...agentSpanNamingAttributes(event.operationName, event.operationName),
-    ...agentTraceIdentityAttributes({
-      rootSessionId: event.rootSessionId,
-      traceSessionId: traceSessionIdOf(event),
-      sessionId: event.sessionId,
-    }),
-  };
-  if (event.turnId !== undefined) attributes["agent.turn.id"] = event.turnId;
-  return attributes;
-}
-
-function updateMemorySpan(span: Span, event: InstrumentationMemoryOperationTerminalEvent): void {
-  if (event.type === "memory.operation.failed") {
-    recordAgentSpanError(span, event.error);
-  } else {
-    if (event.recordCount !== undefined) {
-      span.setAttribute("gen_ai.memory.record.count", event.recordCount);
-    }
-    const records = genAiMemoryRecordsAttribute(event.outputRecords ?? []);
-    if (records !== undefined && event.outputRecords !== undefined) {
-      span.setAttribute("gen_ai.memory.records", records);
-    }
-  }
 }
 
 function contextFromSpanContext(spanContext: Parameters<typeof trace.wrapSpanContext>[0]): Context {

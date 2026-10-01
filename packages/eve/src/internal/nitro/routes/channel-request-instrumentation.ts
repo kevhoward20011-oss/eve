@@ -10,10 +10,14 @@ import {
 } from "#compiled/@opentelemetry/api/index.js";
 import { getInstrumentationRuntime } from "#instrumentation/runtime.js";
 import { markAgentTraceContext } from "#tracing/agent-trace-context.js";
-import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
 import { AGENT_SPAN_NAMES } from "#tracing/agent-span-contract.js";
 import { withErrorContent } from "#tracing/error-content-context.js";
 import { startEveSpan } from "#tracing/adapters/eve/span.js";
+import {
+  requestAttributes,
+  requestStatusAttributes,
+  applyAttributes,
+} from "#tracing/core/contract.js";
 
 /**
  * Stable tracer name for every inbound eve channel HTTP request. Kept
@@ -85,7 +89,6 @@ export async function traceChannelRequest<T extends Response>(
     options: {
       attributes: {
         ...baseAttributes(request, routeKey),
-        ...(spanName === "agent.channel.request" ? agentSpanNamingAttributes(spanName) : undefined),
       },
       kind: SpanKind.SERVER,
     },
@@ -97,7 +100,7 @@ export async function traceChannelRequest<T extends Response>(
 
   try {
     const response = await context.with(activeContext, () => handler(span));
-    span.setAttribute("http.response.status_code", response.status);
+    applyAttributes(span, requestStatusAttributes(response.status));
     if (response.status >= 500) {
       span.setStatus({ code: SpanStatusCode.ERROR });
     }
@@ -117,18 +120,13 @@ export async function traceChannelRequest<T extends Response>(
  * ids, tokens, auth or cookie headers, bodies, or query parameters.
  */
 function baseAttributes(request: Request, routeKey: string): Attributes {
-  const attributes: Attributes = {
-    "http.request.method": request.method,
-    "http.route": routeTemplate(routeKey),
-  };
-
   const url = parseRequestUrl(request.url);
-  if (url !== undefined) {
-    attributes["url.scheme"] = url.protocol.replace(/:$/, "");
-    attributes["server.address"] = url.hostname;
-  }
-
-  return attributes;
+  return requestAttributes({
+    method: request.method,
+    route: routeTemplate(routeKey),
+    scheme: url?.protocol.replace(/:$/, ""),
+    serverAddress: url?.hostname,
+  });
 }
 
 /**

@@ -13,17 +13,13 @@ import type {
 } from "#instrumentation/lifecycle.js";
 import type { JsonValue } from "#shared/json.js";
 import { contentAttribute } from "#tracing/agent-otel-content.js";
-import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
-import { agentTraceIdentityAttributes, traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
+import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 import { decodeTraceSessionId } from "#tracing/agent-trace-context-codec.js";
-import { AGENT_SPAN_NAMES } from "#tracing/agent-span-contract.js";
-import { recordAgentSpanError as recordError } from "#tracing/agent-span-error.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { normalizeChannelAudience, type ChannelAudience } from "#shared/channel-audience.js";
-import { startEveSpan } from "#tracing/adapters/eve/span.js";
-import { frameworkAttributes } from "#tracing/core/attributes.js";
+import { bindEveTraceScope } from "#tracing/adapters/eve/scopes.js";
 
 interface AgentApprovalSpanState {
   readonly traceSessionId: string;
@@ -89,58 +85,51 @@ export function createAgentApprovalInstrumentation(input: {
     ctx.state.set(state);
   };
 
-  const onResolved = (
+  const onResolved = async (
     event: InstrumentationInputResolvedEvent,
     ctx: InstrumentationHandlerContext,
-  ): void => {
+  ): Promise<void> => {
     const state = readState(ctx.state.get());
     if (state === undefined) return;
-    const span = input.idGenerator.withSpanId(
-      input.idGenerator.deriveSpanId(`approval:${event.idempotencyKey}`),
-      () =>
-        startEveSpan({
-          tracer: input.tracer,
-          type: "approval",
-          operationId: event.idempotencyKey,
-          name: AGENT_SPAN_NAMES.approval,
-          options: {
-            attributes: {
-              "agent.action.call_id": state.actionCallId,
-              "agent.action.name": state.actionName,
-              "agent.approval.kind": "tool-approval",
-              "agent.approval.outcome": event.outcome,
-              "agent.approval.request_id": state.requestId,
-              ...frameworkAttributes({ name: "eve", version: input.frameworkVersion }),
-              "agent.step.attempt": state.attemptIndex,
-              "agent.step.index": state.stepIndex,
-              "agent.turn.id": state.turnId,
-              ...agentSpanNamingAttributes("agent.approval"),
-              ...agentTraceIdentityAttributes({
-                rootSessionId: state.rootSessionId,
-                traceSessionId: state.traceSessionId,
-                sessionId: state.sessionId,
-              }),
-            },
-            startTime: state.startTimeMs,
-          },
-          parent: withChannelAudience(
-            trace.setSpan(
-              ROOT_CONTEXT,
-              trace.wrapSpanContext({ ...state.parent, isRemote: false }),
-            ),
-            state.channelAudience,
-          ),
-        }),
-    );
-    if (state.requestAttribute !== undefined) {
-      span.setAttribute("agent.approval.request", state.requestAttribute);
-    }
-    if (event.response !== undefined) {
-      const response = contentAttribute(event.response);
-      if (response !== undefined) span.setAttribute("agent.approval.response", response);
-    }
-    if (event.outcome === "failed") recordError(span, event.error);
-    span.end();
+    const bound = await bindEveTraceScope({
+      tracer: input.tracer,
+      idGenerator: input.idGenerator,
+      key: event.idempotencyKey,
+      identity: {
+        sessionId: state.sessionId,
+        rootSessionId: state.rootSessionId,
+        traceSessionId: state.traceSessionId,
+        turnId: state.turnId,
+        frameworkVersion: input.frameworkVersion,
+      },
+      data: {
+        type: "approval",
+        options: {
+          callId: state.actionCallId,
+          actionName: state.actionName,
+          requestId: state.requestId,
+          request:
+            state.requestAttribute === undefined ? undefined : JSON.parse(state.requestAttribute),
+        },
+      },
+      parent: withChannelAudience(
+        trace.setSpan(ROOT_CONTEXT, trace.wrapSpanContext({ ...state.parent, isRemote: false })),
+        state.channelAudience,
+      ),
+      reference: {
+        ...state.parent,
+        spanId: input.idGenerator.deriveSpanId(`approval:${event.idempotencyKey}`),
+      },
+      startTimeMs: state.startTimeMs,
+      deferred: true,
+      attempt: { index: state.stepIndex, attempt: state.attemptIndex },
+    });
+    await bound.finish({
+      outcome: event.outcome,
+      response: event.response,
+      failed: event.outcome === "failed",
+      error: event.error,
+    });
   };
 
   return {

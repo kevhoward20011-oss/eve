@@ -17,9 +17,8 @@ Keep its existing `createAiSdkHookBridge` for eve event conversion. The standalo
 SDK adapter supplies callback-owned lifetimes; it does not replace eve's bridge
 or install a second bridge in eve.
 
-Use one callback for each turn. SDK hooks control steps, model calls, and tools.
-Keep durable execution separate from ordinary execution. Both modes use the same
-span construction functions.
+Use a callback DSL to construct the trace topology. SDK hooks construct the same
+scopes internally. Keep persistence at the runtime boundary, not in authoring code.
 
 Keep vendor names out of the core API. An explicit output wrapper preserves
 existing eve traces and Agent Runs behavior.
@@ -149,6 +148,24 @@ The standalone SDK adapter returns full `TelemetryOptions` with `isEnabled: true
 Its `integrations` option retains unrelated telemetry integrations.
 eve uses `createAiSdkHookBridge` instead. That bridge emits model and tool events,
 not action events; framework dispatch remains the sole action source.
+
+For a custom loop, construct children through their parent scopes:
+
+```ts
+await tracing.turn(turnInfo, async (turn) => {
+  await turn.step({ index: 0 }, async (step) => {
+    await step.model({ provider, modelId }, callModel, modelResult);
+    await step.action({ callId, name: "lookup" }, async (action) => {
+      await action.approval({ requestId }, requestApproval);
+      return await action.tool(executeLookup);
+    });
+  });
+});
+```
+
+Construction controls parentage, span names, attributes, completion, and cleanup.
+No authoring scope exposes a raw span, attribute map, checkpoint, or resume method.
+
 
 ## Span topology and lifetime
 
@@ -457,6 +474,19 @@ formats do not belong in the core API. Transport compatibility is separate from
 output mapping and authorization.
 
 ## eve adoption and durable state
+
+Configure persistence once through a runtime-owned `ScopePersistence` adapter.
+The adapter loads, saves, and removes serializable records in the existing
+workflow checkpoint. The library does not create a separate checkpoint.
+
+Internal runtime bindings supply stable operation keys. Scope construction
+restores or creates the corresponding record. The record retains ancestry,
+reserved identity, start time, capture permission, and semantic operation data.
+Only the application runtime controls suspension, replay, and retry.
+Tracing must never invoke earlier application callbacks during restoration.
+
+eve can project its existing durable records into runtime scope bindings.
+Do not add a second persistence owner or expose those bindings to tool authors.
 
 Keep `createAgentOtelInstrumentation()` as the installation entry point.
 Replace its span construction with calls to the shared engine.
