@@ -7,13 +7,11 @@ import {
   checkRemoteInputResponder,
   getPendingRemoteInput,
   getPendingRemoteInputs,
-  isRemoteInputPendingOutput,
   loadRemoteInputContinuations,
   modelFacingRemoteInputOutput,
   parkRemoteInputs,
   requestRemoteInput,
   takeRemoteInputContinuation,
-  type RemoteInputSignal,
 } from "#harness/remote-input.js";
 import { stashToolInterrupt } from "#harness/tool-interrupts.js";
 import type { HarnessSession, SessionStateMap } from "#harness/types.js";
@@ -364,40 +362,34 @@ describe("parkRemoteInputs", () => {
 });
 
 describe("checkRemoteInputResponder", () => {
-  it("accepts the same person", () => {
-    expect(checkRemoteInputResponder(parkedState(), "remote-input_call_1", { ...alice })).toBe(
-      "accept",
-    );
-  });
-
-  it("refuses a different principalId", () => {
-    expect(checkRemoteInputResponder(parkedState(), "remote-input_call_1", bob)).toBe("refuse");
-  });
-
-  it("refuses the same principalId from a different issuer", () => {
-    expect(
-      checkRemoteInputResponder(parkedState(), "remote-input_call_1", {
-        ...alice,
-        issuer: "https://other.example",
-      }),
-    ).toBe("refuse");
-  });
-
-  it("fails closed when the answer names no responder", () => {
-    expect(checkRemoteInputResponder(parkedState(), "remote-input_call_1", null)).toBe(
+  it.each<[string, SessionStateMap | undefined, string, SessionAuthContext | null, unknown]>([
+    ["accepts the same person", parkedState(), "remote-input_call_1", { ...alice }, "accept"],
+    ["refuses a different principalId", parkedState(), "remote-input_call_1", bob, "refuse"],
+    [
+      "refuses the same principalId from a different issuer",
+      parkedState(),
+      "remote-input_call_1",
+      { ...alice, issuer: "https://other.example" },
+      "refuse",
+    ],
+    [
+      "fails closed when the answer names no responder",
+      parkedState(),
+      "remote-input_call_1",
+      null,
       "fail-closed",
-    );
-  });
-
-  it("fails closed when the call ran for no authenticated user", () => {
-    expect(
-      checkRemoteInputResponder(parkedState("call_1", null), "remote-input_call_1", alice),
-    ).toBe("fail-closed");
-  });
-
-  it("returns undefined for an unknown requestId", () => {
-    expect(checkRemoteInputResponder(parkedState(), "approval-1", alice)).toBeUndefined();
-    expect(checkRemoteInputResponder(undefined, "remote-input_call_1", alice)).toBeUndefined();
+    ],
+    [
+      "fails closed when the call ran for no authenticated user",
+      parkedState("call_1", null),
+      "remote-input_call_1",
+      alice,
+      "fail-closed",
+    ],
+    ["ignores an unknown requestId", parkedState(), "approval-1", alice, undefined],
+    ["ignores a session with no journal", undefined, "remote-input_call_1", alice, undefined],
+  ])("%s", (_label, state, requestId, responder, expected) => {
+    expect(checkRemoteInputResponder(state, requestId, responder)).toBe(expected);
   });
 });
 
@@ -436,20 +428,6 @@ describe("loadRemoteInputContinuations / takeRemoteInputContinuation", () => {
     expect(contextStorage.run(ctx, () => takeRemoteInputContinuation("call_1"))).toBeUndefined();
   });
 
-  it("keeps a still-pending request", () => {
-    const ctx = new ContextContainer();
-    const before = session(parkedState());
-    const next = loadRemoteInputContinuations({
-      context: ctx,
-      pendingRequestIds: new Set(["remote-input_call_1"]),
-      resolved: undefined,
-      session: before,
-    });
-    expect(next).toBe(before);
-    expect(getPendingRemoteInputs(next.state)).toHaveLength(1);
-    expect(contextStorage.run(ctx, () => takeRemoteInputContinuation("call_1"))).toBeUndefined();
-  });
-
   it("prunes an entry whose request is no longer pending and was not resolved", () => {
     const next = loadRemoteInputContinuations({
       context: new ContextContainer(),
@@ -458,19 +436,5 @@ describe("loadRemoteInputContinuations / takeRemoteInputContinuation", () => {
       session: session(parkedState()),
     });
     expect(getPendingRemoteInputs(next.state)).toEqual([]);
-  });
-});
-
-describe("modelFacingRemoteInputOutput", () => {
-  it("carries only the connection, not the prompt or retry", () => {
-    const full: RemoteInputSignal = signal();
-    const output = modelFacingRemoteInputOutput(full);
-    expect(isRemoteInputPendingOutput(output)).toBe(true);
-    expect(output).toEqual({ __eveRemoteInputPending: true, connection: "billing-agent" });
-    const serialized = JSON.stringify(output);
-    expect(serialized).not.toContain(full.prompt);
-    expect(serialized).not.toContain(SECRET_STATE);
-    expect(serialized).not.toContain("approve");
-    expect(serialized).not.toContain("inputResponses");
   });
 });

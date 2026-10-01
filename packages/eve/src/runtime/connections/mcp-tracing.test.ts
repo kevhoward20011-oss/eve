@@ -284,7 +284,6 @@ describe("MCP trace propagation", () => {
   describe("requestMeta", () => {
     const traceparent = `00-${"1".repeat(32)}-${"2".repeat(16)}-01`;
     const sessionMeta = { "dev.eve/tool-session": "key-1" };
-    const requestMeta = (method: string) => (method === "tools/call" ? sessionMeta : undefined);
 
     function makeFetch(injectContext: (context: unknown, carrier: Record<string, string>) => void) {
       const fetcher = vi.fn(
@@ -297,21 +296,29 @@ describe("MCP trace propagation", () => {
         getActiveContext: () => ROOT_CONTEXT,
         getProtocolVersion: () => undefined,
         injectContext,
-        requestMeta,
+        requestMeta: (method) => (method === "tools/call" ? sessionMeta : undefined),
       });
       return { fetch, fetcher };
     }
 
-    function sentMeta(fetcher: ReturnType<typeof vi.fn>): Record<string, unknown> {
-      const init = fetcher.mock.calls[0]?.[1] as RequestInit | undefined;
-      return (JSON.parse(String(init?.body)) as { params: { _meta: Record<string, unknown> } })
-        .params._meta;
+    function sentMeta(fetcher: ReturnType<typeof vi.fn>, call = 0): unknown {
+      const init = fetcher.mock.calls[call]?.[1] as RequestInit | undefined;
+      return (JSON.parse(String(init?.body)) as { params: { _meta?: unknown } }).params._meta;
     }
 
-    it("merges extra meta with existing meta and trace context", async () => {
-      const { fetch, fetcher } = makeFetch((_context, carrier) => {
-        carrier.traceparent = traceparent;
-      });
+    it.each<[string, (carrier: Record<string, string>) => void, Record<string, unknown>]>([
+      [
+        "merges extra meta with existing meta and trace context",
+        (carrier) => (carrier.traceparent = traceparent),
+        { ...sessionMeta, caller: "eve", traceparent },
+      ],
+      [
+        "still merges extra meta when trace context is skipped for size",
+        (carrier) => (carrier.baggage = `vendor=${"x".repeat(8192)}`),
+        { ...sessionMeta, caller: "eve" },
+      ],
+    ])("%s", async (_label, inject, expected) => {
+      const { fetch, fetcher } = makeFetch((_context, carrier) => inject(carrier));
 
       await fetch("https://mcp.example.com", {
         body: JSON.stringify({
@@ -323,28 +330,10 @@ describe("MCP trace propagation", () => {
         method: "POST",
       });
 
-      expect(sentMeta(fetcher)).toEqual({ ...sessionMeta, caller: "eve", traceparent });
+      expect(sentMeta(fetcher)).toEqual(expected);
     });
 
-    it("still merges extra meta when trace context is skipped for size", async () => {
-      const { fetch, fetcher } = makeFetch((_context, carrier) => {
-        carrier.baggage = `vendor=${"x".repeat(8192)}`;
-      });
-
-      await fetch("https://mcp.example.com", {
-        body: JSON.stringify({
-          id: 1,
-          jsonrpc: "2.0",
-          method: "tools/call",
-          params: { arguments: {}, name: "get_issue" },
-        }),
-        method: "POST",
-      });
-
-      expect(sentMeta(fetcher)).toEqual(sessionMeta);
-    });
-
-    it("adds meta only for methods where requestMeta returns a value", async () => {
+    it("leaves a request untouched when requestMeta returns nothing for its method", async () => {
       const { fetch, fetcher } = makeFetch(() => {});
       const listInit = {
         body: JSON.stringify({ id: 2, jsonrpc: "2.0", method: "tools/list", params: {} }),
@@ -352,21 +341,8 @@ describe("MCP trace propagation", () => {
       } satisfies RequestInit;
 
       await fetch("https://mcp.example.com", listInit);
-      expect(fetcher.mock.calls[0]?.[1]).toBe(listInit);
 
-      await fetch("https://mcp.example.com", {
-        body: JSON.stringify({
-          id: 3,
-          jsonrpc: "2.0",
-          method: "tools/call",
-          params: { arguments: {}, name: "get_issue" },
-        }),
-        method: "POST",
-      });
-      const init = fetcher.mock.calls[1]?.[1] as RequestInit | undefined;
-      expect(
-        (JSON.parse(String(init?.body)) as { params: { _meta: unknown } }).params._meta,
-      ).toEqual(sessionMeta);
+      expect(fetcher.mock.calls[0]?.[1]).toBe(listInit);
     });
   });
 });

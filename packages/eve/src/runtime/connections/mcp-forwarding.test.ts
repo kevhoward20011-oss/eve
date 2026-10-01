@@ -41,23 +41,20 @@ describe("encodeForwardedPrincipalHeader", () => {
     }
   });
 
-  it("throws when the header would exceed the limit", () => {
-    const principal = {
-      current: userAuth("u-1", { blob: "a".repeat(MAX_FORWARDED_PRINCIPAL_HEADER_BYTES) }),
-    };
-    expect(() => encodeForwardedPrincipalHeader(principal, "remote")).toThrow(
+  it("accepts a header exactly at the limit and rejects one byte of JSON more", () => {
+    // Unpadded base64url of 3n bytes is exactly 4n characters.
+    const jsonBytes = (MAX_FORWARDED_PRINCIPAL_HEADER_BYTES / 4) * 3;
+    const overhead = JSON.stringify({ current: userAuth("u-1", { blob: "" }) }).length;
+    const sized = (extra: number) => ({
+      current: userAuth("u-1", { blob: "a".repeat(jsonBytes - overhead + extra) }),
+    });
+
+    expect(encodeForwardedPrincipalHeader(sized(0), "remote")).toHaveLength(
+      MAX_FORWARDED_PRINCIPAL_HEADER_BYTES,
+    );
+    expect(() => encodeForwardedPrincipalHeader(sized(1), "remote")).toThrow(
       /Connection "remote" cannot forward.*16384-byte limit/u,
     );
-  });
-
-  it("accepts a header exactly at the limit", () => {
-    const base = { current: userAuth("u-1", { blob: "" }) };
-    const overhead = Buffer.from(JSON.stringify(base)).toString("base64url").length;
-    // Each 3 ASCII chars add 4 base64 chars; size the blob to land on the limit.
-    const blobChars = ((MAX_FORWARDED_PRINCIPAL_HEADER_BYTES - overhead) / 4) * 3;
-    const principal = { current: userAuth("u-1", { blob: "a".repeat(Math.floor(blobChars)) }) };
-    const encoded = encodeForwardedPrincipalHeader(principal, "remote");
-    expect(encoded.length).toBeLessThanOrEqual(MAX_FORWARDED_PRINCIPAL_HEADER_BYTES);
   });
 });
 

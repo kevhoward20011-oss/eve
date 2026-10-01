@@ -431,90 +431,53 @@ describe("coordinateApprovalDelivery with a remote input pending", () => {
     );
   }
 
-  it("passes an answer from the journaled user through unchanged", async () => {
-    const session = remoteParkedSession();
-    const attributed = [
-      { auth: responder, response: { optionId: "approve", requestId: remoteRequestId } },
-    ];
-    const result = await coordinateApprovalDelivery({
-      now: 100,
-      session,
-      stepInput: { attributedInputResponses: attributed },
-      tools: new Map(),
-    });
-    expect(result.feedback).toEqual([]);
-    expect(responsesOf(result.stepInput)).toEqual([attributed[0]!.response]);
-    expect(getApprovalAuditState(result.session.state).settlements).toEqual([
-      expect.objectContaining({ outcome: "allowed", requestId: remoteRequestId }),
-    ]);
-  });
-
-  it("passes a plain answer from the journaled turn user through unchanged", async () => {
+  // Only the journaled user may answer; null fails closed by cancelling.
+  it.each(
+    (["attributed", "plain"] as const).flatMap((source) =>
+      (
+        [
+          ["the journaled user", responder, "accept"],
+          ["another user", intruder, "refuse"],
+          ["nobody", null, "fail-closed"],
+        ] as const
+      ).map(([who, auth, rule]) => ({ auth, rule, source, who })),
+    ),
+  )("screens a $source answer from $who ($rule)", async ({ auth, rule, source }) => {
+    const answer = { optionId: "approve", requestId: remoteRequestId };
+    const stepInput: StepInput =
+      source === "attributed"
+        ? { attributedInputResponses: [{ auth, response: answer }] }
+        : { inputResponses: [answer] };
+    // A plain answer is attributed to the turn's caller.
     const ctx = new ContextContainer();
-    ctx.set(AuthKey, responder);
-    const responses = [{ optionId: "approve", requestId: remoteRequestId }];
+    if (source === "plain") ctx.set(AuthKey, auth);
+
     const result = await contextStorage.run(ctx, () =>
       coordinateApprovalDelivery({
         now: 100,
         session: remoteParkedSession(),
-        stepInput: { inputResponses: responses },
+        stepInput,
         tools: new Map(),
       }),
     );
-    expect(result.feedback).toEqual([]);
-    expect(responsesOf(result.stepInput)).toEqual(responses);
-  });
 
-  it("drops another user's answer and keeps the request pending", async () => {
-    const result = await coordinateApprovalDelivery({
-      now: 100,
-      session: remoteParkedSession(),
-      stepInput: {
-        attributedInputResponses: [
-          { auth: intruder, response: { optionId: "approve", requestId: remoteRequestId } },
-        ],
-      },
-      tools: new Map(),
-    });
-    expect(result.feedback).toContain(REMOTE_INPUT_REFUSED_FEEDBACK);
-    expect(responsesOf(result.stepInput)).toEqual([]);
-    expect(pendingRequestIds(result.session)).toContain(remoteRequestId);
-    expect(getPendingRemoteInputs(result.session.state)).toHaveLength(1);
-    expect(getApprovalAuditState(result.session.state).settlements).toEqual([]);
-  });
-
-  it("drops another turn user's plain answer", async () => {
-    const ctx = new ContextContainer();
-    ctx.set(AuthKey, intruder);
-    const result = await contextStorage.run(ctx, () =>
-      coordinateApprovalDelivery({
-        now: 100,
-        session: remoteParkedSession(),
-        stepInput: { inputResponses: [{ optionId: "approve", requestId: remoteRequestId }] },
-        tools: new Map(),
-      }),
-    );
-    expect(result.feedback).toContain(REMOTE_INPUT_REFUSED_FEEDBACK);
-    expect(responsesOf(result.stepInput)).toEqual([]);
-    expect(pendingRequestIds(result.session)).toContain(remoteRequestId);
-    expect(getApprovalAuditState(result.session.state).settlements).toEqual([]);
-  });
-
-  it("rewrites an answer that names nobody to cancel (fails closed)", async () => {
-    const result = await coordinateApprovalDelivery({
-      now: 100,
-      session: remoteParkedSession(),
-      stepInput: {
-        attributedInputResponses: [
-          { auth: null, response: { optionId: "approve", requestId: remoteRequestId } },
-        ],
-      },
-      tools: new Map(),
-    });
-    expect(result.feedback).toContain(REMOTE_INPUT_FAILED_CLOSED_FEEDBACK);
-    expect(responsesOf(result.stepInput)).toEqual([
-      { optionId: "cancel", requestId: remoteRequestId },
-    ]);
+    const settlements = getApprovalAuditState(result.session.state).settlements;
+    if (rule === "accept") {
+      expect(result.feedback).toEqual([]);
+      expect(responsesOf(result.stepInput)).toEqual([answer]);
+      expect(settlements).toEqual([
+        expect.objectContaining({ outcome: "allowed", requestId: remoteRequestId }),
+      ]);
+    } else if (rule === "refuse") {
+      expect(result.feedback).toEqual([REMOTE_INPUT_REFUSED_FEEDBACK]);
+      expect(responsesOf(result.stepInput)).toEqual([]);
+      expect(pendingRequestIds(result.session)).toContain(remoteRequestId);
+      expect(getPendingRemoteInputs(result.session.state)).toHaveLength(1);
+      expect(settlements).toEqual([]);
+    } else {
+      expect(result.feedback).toContain(REMOTE_INPUT_FAILED_CLOSED_FEEDBACK);
+      expect(responsesOf(result.stepInput)).toEqual([{ ...answer, optionId: "cancel" }]);
+    }
   });
 
   it("leaves ordinary approvals alone while a remote input is pending", async () => {

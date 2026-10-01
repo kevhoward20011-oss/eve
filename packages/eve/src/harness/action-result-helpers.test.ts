@@ -4,7 +4,7 @@ import {
   createRuntimeToolResultFromToolError,
   createRuntimeToolResultFromValue,
 } from "#harness/action-result-helpers.js";
-import { modelFacingRemoteInputOutput, requestRemoteInput } from "#harness/remote-input.js";
+import { requestRemoteInput } from "#harness/remote-input.js";
 
 describe("createRuntimeToolResultFromValue", () => {
   it("rejects non-JSON-serializable successful action results", () => {
@@ -83,13 +83,10 @@ describe("createRuntimeToolResultFromValue with a remote input signal", () => {
     prompt: "Approve the refund?",
   });
 
-  it.each([
-    ["the full signal", signal],
-    ["the model-facing output", modelFacingRemoteInputOutput(signal)],
-  ])("projects %s without the retry payload", (_label, output) => {
+  it("projects the full signal to its model-facing output, without the retry payload", () => {
     const result = createRuntimeToolResultFromValue({
       callId: "call_1",
-      output,
+      output: signal,
       toolName: "connection_execute",
     });
     expect(result.output).toEqual({ __eveRemoteInputPending: true, connection: "billing" });

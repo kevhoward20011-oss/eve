@@ -7,7 +7,7 @@ import type { Readable } from "node:stream";
 
 import { jsonSchema, type LanguageModel } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { SessionAuthContext } from "../../src/channel/types.js";
 import { ContextContainer, contextStorage } from "../../src/context/container.js";
@@ -17,7 +17,10 @@ import { ConnectionRegistryKey } from "../../src/context/providers/connection-ke
 import { resolveConnectionTools } from "../../src/execution/tools/connection-tools.js";
 import { CONNECTION_EXECUTE_TOOL_NAME } from "../../src/execution/tools/connection-target.js";
 import type { HarnessToolDefinition } from "../../src/harness/execute-tool.js";
-import { getPendingRemoteInputs } from "../../src/harness/remote-input.js";
+import {
+  getPendingRemoteInputs,
+  REMOTE_INPUT_REFUSED_FEEDBACK,
+} from "../../src/harness/remote-input.js";
 import { createToolLoopHarness } from "../../src/harness/tool-loop.js";
 import type { HarnessSession, StepInput, StepResult } from "../../src/harness/types.js";
 import { buildApplication } from "../../src/internal/nitro/host/build-application.js";
@@ -233,6 +236,12 @@ describe("eve agent consuming another eve agent's tools over MCP", () => {
         output: { value: { caller: "alice", deployed: "prod" } },
       });
       expect(done.session.history.at(-1)).toMatchObject({ role: "assistant" });
+      // Nor after the retry that echoed it to B.
+      expect(JSON.stringify(agent.model.doStreamCalls.map((call) => call.prompt))).not.toContain(
+        requestState,
+      );
+      expect(JSON.stringify(agent.events)).not.toContain(requestState);
+      expect(JSON.stringify(done.session)).not.toContain(requestState);
     },
     OPERATION_TIMEOUT_MS * 2,
   );
@@ -250,6 +259,12 @@ describe("eve agent consuming another eve agent's tools over MCP", () => {
       const refused = await agent.deliver(bob, parked.session, answer(bob, request, "approve"));
 
       expect(await deploys()).toEqual(before);
+      expect(agent.events).toContainEqual(
+        expect.objectContaining({
+          data: expect.objectContaining({ message: REMOTE_INPUT_REFUSED_FEEDBACK }),
+          type: "message.completed",
+        }),
+      );
       // The request stays Alice's: still pending, still answerable by her.
       expect(getPendingRemoteInputs(refused.session.state)).toMatchObject([
         { responder: { principalId: "alice" } },
@@ -320,15 +335,32 @@ describe("eve agent consuming another eve agent's tools over MCP", () => {
     async () => {
       const before = await deploys();
       const agent = createAgentA({ requestInput: false });
-      const result = await agent.deliver(null, createSession("a2a-scheduled"), {
-        message: "Nightly deploy of prod.",
-      });
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+      let result: StepResult;
+      let toolCalls: unknown[];
+      try {
+        result = await agent.deliver(null, createSession("a2a-scheduled"), {
+          message: "Nightly deploy of prod.",
+        });
+      } finally {
+        toolCalls = fetchSpy.mock.calls.filter(([, init]) =>
+          String(init?.body).includes('"method":"tools/call"'),
+        );
+        fetchSpy.mockRestore();
+      }
 
+      // B was asked once and answered input_required; A neither retried nor asked anyone.
+      expect(toolCalls).toHaveLength(1);
       expect(agent.requested).toEqual([]);
       expect(getPendingRemoteInputs(result.session.state)).toEqual([]);
       expect(await deploys()).toEqual(before);
-      const output = JSON.stringify(agent.lastToolOutput());
-      expect(output).toMatch(/approval|input|ask/iu);
+      expect(agent.lastToolOutput()).toMatchObject({
+        output: {
+          value: expect.stringContaining(
+            "ops__deploy needs the user to approve it, but this session cannot ask anyone, such as a scheduled run.",
+          ),
+        },
+      });
       expect(result.session.history.at(-1)).toMatchObject({ role: "assistant" });
     },
     OPERATION_TIMEOUT_MS * 2,

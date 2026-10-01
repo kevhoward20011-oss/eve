@@ -98,12 +98,23 @@ function resolveAs(stepInput: StepInput, turnAuth?: SessionAuthContext) {
 }
 
 describe("typed answers to a remote input", () => {
-  it.each([
-    ["approve", true],
-    ["1", true],
-    ["cancel", false],
-  ])("accepts %j from the user the call ran for", (text, approved) => {
-    const result = resolveAs({ message: text, messageAuth: alice });
+  it.each<[string, StepInput, SessionAuthContext | undefined, boolean]>([
+    [
+      '"approve" from the user the call ran for',
+      { message: "approve", messageAuth: alice },
+      undefined,
+      true,
+    ],
+    ['"1" from the user the call ran for', { message: "1", messageAuth: alice }, undefined, true],
+    [
+      '"cancel" from the user the call ran for',
+      { message: "cancel", messageAuth: alice },
+      undefined,
+      false,
+    ],
+    ["an unattributed message from the turn user", { message: "approve" }, alice, true],
+  ])("accepts %s", (_label, stepInput, turnAuth, approved) => {
+    const result = resolveAs(stepInput, turnAuth);
     expect(result.outcome).toBe("resolved");
     expect(result.consumedMessage).toBe(true);
     expect(approvalResponses(result.messages)).toEqual([
@@ -111,31 +122,16 @@ describe("typed answers to a remote input", () => {
     ]);
   });
 
-  it("accepts a typed answer from the turn user when the message is unattributed", () => {
-    const result = resolveAs({ message: "approve" }, alice);
-    expect(approvalResponses(result.messages)).toEqual([
-      expect.objectContaining({ approvalId: remoteRequestId, approved: true }),
-    ]);
-  });
-
-  it.each(["approve", "1", "cancel"])("refuses %j from someone else", (text) => {
-    const result = resolveAs({ message: text, messageAuth: bob });
+  it.each<[string, StepInput, SessionAuthContext | undefined]>([
+    ["someone else's message", { message: "approve", messageAuth: bob }, undefined],
+    ["an unattributed message from another turn user", { message: "approve" }, bob],
+    ["a message that names nobody", { message: "approve", messageAuth: null }, alice],
+  ])("refuses %s and keeps the request pending", (_label, stepInput, turnAuth) => {
+    const result = resolveAs(stepInput, turnAuth);
     expect(approvalResponses(result.messages)).toEqual([]);
     expect(result.consumedMessage).not.toBe(true);
     expect(pendingRequestIds(result.session)).toContain(remoteRequestId);
     expect(getPendingRemoteInputs(result.session.state)).toHaveLength(1);
-  });
-
-  it("refuses a typed answer from another turn user", () => {
-    const result = resolveAs({ message: "approve" }, bob);
-    expect(approvalResponses(result.messages)).toEqual([]);
-    expect(pendingRequestIds(result.session)).toContain(remoteRequestId);
-  });
-
-  it("does not accept a typed answer whose message names nobody", () => {
-    const result = resolveAs({ message: "approve", messageAuth: null }, alice);
-    expect(approvalResponses(result.messages)).toEqual([]);
-    expect(pendingRequestIds(result.session)).toContain(remoteRequestId);
   });
 
   it("does not select the remote batch for replay on someone else's typed approve", () => {

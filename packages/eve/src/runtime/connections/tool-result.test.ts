@@ -43,6 +43,17 @@ describe("toConnectionToolResult", () => {
       expected: { ok: false, error: '{"code":"busy"}' },
     },
     {
+      // mcpChannel's input_unsupported sign-in reason must reach the model.
+      name: "prefers an error's text over its structured content",
+      tool,
+      raw: {
+        isError: true,
+        content: [{ type: "text", text: "Sign-in needs a URL." }],
+        structuredContent: { error: { code: "input_unsupported" } },
+      },
+      expected: { ok: false, error: "Sign-in needs a URL." },
+    },
+    {
       name: "reports a generic error when an error has no detail",
       tool,
       raw: { isError: true, content: [] },
@@ -61,18 +72,6 @@ describe("toConnectionToolResult", () => {
 });
 
 describe("connectionToolModelOutput", () => {
-  it("surfaces an input_unsupported sign-in from mcpChannel as an error with the server's reason", () => {
-    const message =
-      'The connection "github" needs a sign-in without a URL, which MCP cannot ask a client for.';
-    expect(
-      toConnectionToolResult("mcp", tool, {
-        content: [{ text: message, type: "text" }],
-        isError: true,
-        structuredContent: { error: { code: "input_unsupported", message, retryable: false } },
-      }),
-    ).toEqual({ error: message, ok: false });
-  });
-
   it("turns resource blobs into named file parts and other resources into text", () => {
     expect(
       connectionToolModelOutput([
