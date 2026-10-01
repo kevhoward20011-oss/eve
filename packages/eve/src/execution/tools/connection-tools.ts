@@ -14,11 +14,7 @@ import { loadContext } from "#context/container.js";
 import { CapabilitiesKey } from "#context/keys.js";
 import { requestRemoteInput, takeRemoteInputContinuation } from "#harness/remote-input.js";
 import { isMcpInputRequiredOutcome } from "#runtime/connections/mcp-client.js";
-import {
-  planMcpInput,
-  type McpInputRetry,
-  type McpSignInLink,
-} from "#runtime/connections/mcp-input-required.js";
+import { planMcpInput, type McpSignInLink } from "#runtime/connections/mcp-input-required.js";
 import { ConnectionRegistryKey } from "#context/providers/connection-key.js";
 import { getAuthorizationResults, type AuthorizationSignal } from "#harness/authorization.js";
 import { reportNestedToolAction } from "#harness/nested-actions.js";
@@ -37,6 +33,7 @@ import { renderToolSignature } from "#runtime/connections/tool-signature.js";
 import type { ResolvedConnectionDefinition } from "#runtime/types.js";
 import {
   supportsInteractiveAuthorization,
+  type ConnectionToolExecuteOptions,
   type ConnectionToolMetadata,
 } from "#shared/connection-types.js";
 import { displayProperName } from "#shared/display-name.js";
@@ -381,10 +378,14 @@ async function executeConnectionTool(
   };
   const continuation = takeRemoteInputContinuation(ctx.callId);
   let attempt = continuation?.attempt ?? 0;
-  let inputRetry: McpInputRetry | undefined =
+  let inputRetry: ConnectionToolExecuteOptions["inputRetry"] =
     continuation === undefined
       ? undefined
-      : { inputResponses: continuation.inputResponses, requestState: continuation.requestState };
+      : {
+          inputResponses: continuation.inputResponses,
+          requestState: continuation.requestState,
+          resolvedArguments: continuation.resolvedArguments,
+        };
   let raw: unknown;
   for (let stateOnlyRetries = 0; ;) {
     try {
@@ -416,7 +417,7 @@ async function executeConnectionTool(
       if (++stateOnlyRetries > MAX_STATE_ONLY_RETRIES) {
         return fail(`${toolName} kept asking to retry without saying what it needs.`);
       }
-      inputRetry = { requestState: raw.requestState };
+      inputRetry = { requestState: raw.requestState, resolvedArguments: raw.resolvedArguments };
       continue;
     }
     // No person can answer this run (a schedule, an unattended caller).
@@ -430,7 +431,12 @@ async function executeConnectionTool(
       return fail(`${toolName} asked for input ${MAX_REMOTE_INPUT_ASKS} times without finishing.`);
     }
     return requestRemoteInput({
-      approve: { attempt, inputResponses: plan.approve, requestState: raw.requestState },
+      approve: {
+        attempt,
+        inputResponses: plan.approve,
+        requestState: raw.requestState,
+        resolvedArguments: raw.resolvedArguments,
+      },
       connection: connection.connectionName,
       prompt: plan.kind === "sign-in" ? signInPrompt(toolName, plan.links) : plan.prompt,
     });

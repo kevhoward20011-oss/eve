@@ -24,6 +24,12 @@
  *    approved call; the tool reads it with
  *    {@link takeRemoteInputContinuation} and retries with the answer. On
  *    deny, the call ends as denied and nothing is sent back.
+ * 5. **Ask again.** A re-run call can return another signal (a sign-in the
+ *    user has not finished). The AI SDK runs it before the model step, so
+ *    its call sits in earlier history: parking moves the call to the end of
+ *    the response with a new request id (`remote-input_<callId>_<n>`) and
+ *    drops its earlier approval parts. The tool bounds how often it asks,
+ *    using `attempt` from the continuation.
  */
 
 import type { ModelMessage, ToolSet, TypedToolResult } from "ai";
@@ -48,6 +54,12 @@ export interface RemoteInputRetry {
   readonly attempt?: number;
   readonly inputResponses?: Readonly<Record<string, unknown>>;
   readonly requestState?: string;
+  /**
+   * The arguments the first round actually sent, after host-provided
+   * arguments were resolved. A retry resends them unchanged, because the
+   * server binds `requestState` to them. Never shown to the model.
+   */
+  readonly resolvedArguments?: unknown;
 }
 
 /** Returned from a tool's `execute` to park the call until its user answers. */
@@ -141,76 +153,87 @@ export function isRemoteInputRequestId(requestId: string): boolean {
 // Park
 // ---------------------------------------------------------------------------
 
+type AssistantPart = Exclude<
+  Extract<ModelMessage, { role: "assistant" }>["content"],
+  string
+>[number];
+type ToolCallPart = Extract<AssistantPart, { type: "tool-call" }>;
+
 /**
  * Converts this step's remote input interrupts into approval requests on
  * their calls. Returns `undefined` when no tool interrupted for remote input.
  *
- * A signal whose call is not in `messages` (a call resumed from an earlier
- * step) cannot be parked; its result becomes an error instead.
+ * A call asked in this step gets its approval request next to its call in
+ * `messages`. A call the AI SDK resumed from an earlier step (an approved
+ * call that asked again) has its call in `history`: the call moves to the end
+ * of `messages` with a fresh approval request, and its earlier approval parts
+ * leave `history`, so the next answer re-runs it and the call still sits right
+ * before its result. A resumed call found nowhere fails with an error result.
  */
 export function parkRemoteInputs(input: {
+  readonly history?: readonly ModelMessage[];
   readonly messages: readonly ModelMessage[];
   readonly responder: SessionAuthContext | null;
   readonly state: SessionStateMap | undefined;
   readonly toolResults: readonly TypedToolResult<ToolSet>[] | undefined;
 }):
   | {
+      readonly history: ModelMessage[];
       readonly messages: ModelMessage[];
       readonly requests: InputRequest[];
       readonly state: SessionStateMap;
     }
   | undefined {
-  const signals = new Map<string, RemoteInputSignal>();
-  for (const toolResult of input.toolResults ?? []) {
-    const signal = readRemoteInputSignal(toolResult);
-    if (signal !== undefined) signals.set(toolResult.toolCallId, signal);
-  }
+  const history = input.history ?? [];
+  const signals = collectRemoteInputSignals(input.messages, input.toolResults);
   if (signals.size === 0) return undefined;
+
+  const stepCallIds = new Set(toolCallParts(input.messages).map((part) => part.toolCallId));
+  const resumedCalls = new Map<string, ToolCallPart>();
+  for (const part of toolCallParts(history)) {
+    if (signals.has(part.toolCallId) && !stepCallIds.has(part.toolCallId)) {
+      resumedCalls.set(part.toolCallId, part);
+    }
+  }
 
   const requests: InputRequest[] = [];
   const entries: PendingRemoteInput[] = [];
-  const parked = new Set<string>();
-  const messages: ModelMessage[] = [];
-  for (const message of input.messages) {
-    if (message.role !== "assistant" || typeof message.content === "string") {
-      messages.push(message);
-      continue;
-    }
-    const content: (typeof message.content)[number][] = [];
-    for (const part of message.content) {
-      content.push(part);
-      if (part.type !== "tool-call") continue;
-      const signal = signals.get(part.toolCallId);
-      if (signal === undefined) continue;
-      const requestId = `${REQUEST_ID_PREFIX}${part.toolCallId}`;
-      content.push({
-        approvalId: requestId,
-        toolCallId: part.toolCallId,
-        type: "tool-approval-request",
-      });
-      requests.push({
-        action: createRuntimeToolCallActionFromToolCall({ toolCall: part }),
-        allowFreeform: false,
-        display: "confirmation",
-        kind: "tool-approval",
-        options: [
-          { id: "approve", label: "Approve" },
-          { id: "cancel", label: "Cancel" },
-        ],
-        prompt: signal.prompt,
-        requestId,
-      });
-      entries.push({
-        callId: part.toolCallId,
-        connection: signal.connection,
-        requestId,
-        responder: input.responder,
-        retry: signal.approve,
-      });
-      parked.add(part.toolCallId);
-    }
-    messages.push({ ...message, content });
-  }
+  const park = (part: ToolCallPart): AssistantPart => {
+    const signal = signals.get(part.toolCallId)!;
+    const requestId = nextRemoteInputRequestId(part.toolCallId, [...history, ...input.messages]);
+    requests.push({
+      action: createRuntimeToolCallActionFromToolCall({ toolCall: part }),
+      allowFreeform: false,
+      display: "confirmation",
+      kind: "tool-approval",
+      options: [
+        { id: "approve", label: "Approve" },
+        { id: "cancel", label: "Cancel" },
+      ],
+      prompt: signal.prompt,
+      requestId,
+    });
+    entries.push({
+      callId: part.toolCallId,
+      connection: signal.connection,
+      requestId,
+      responder: input.responder,
+      retry: signal.approve,
+    });
+    return { approvalId: requestId, toolCallId: part.toolCallId, type: "tool-approval-request" };
+  };
+
+  const messages: ModelMessage[] = input.messages.map((message) => {
+    if (message.role !== "assistant" || typeof message.content === "string") return message;
+    return {
+      ...message,
+      content: message.content.flatMap((part) =>
+        part.type === "tool-call" && signals.has(part.toolCallId) ? [part, park(part)] : [part],
+      ),
+    };
+  });
+  const parked = new Set([...stepCallIds].filter((callId) => signals.has(callId)));
+  for (const callId of resumedCalls.keys()) parked.add(callId);
 
   const projected = messages.flatMap((message): ModelMessage[] => {
     if (message.role !== "tool") return [message];
@@ -224,7 +247,7 @@ export function parkRemoteInputs(input: {
             type: "error-text" as const,
             value:
               `Connection "${signals.get(part.toolCallId)!.connection}" asked for input on a ` +
-              "resumed call, which eve cannot ask about. Call the tool again.",
+              "call eve can no longer find. Call the tool again.",
           },
         },
       ];
@@ -232,7 +255,18 @@ export function parkRemoteInputs(input: {
     return content.length === 0 ? [] : [{ ...message, content }];
   });
 
+  const resumedParts = [...resumedCalls.values()].flatMap((part) => [part, park(part)]);
+  if (resumedParts.length > 0) {
+    const last = projected.at(-1);
+    if (last?.role === "assistant" && typeof last.content !== "string") {
+      projected[projected.length - 1] = { ...last, content: [...last.content, ...resumedParts] };
+    } else {
+      projected.push({ content: resumedParts, role: "assistant" });
+    }
+  }
+
   return {
+    history: resumedCalls.size === 0 ? [...history] : withoutCalls(history, resumedCalls),
     messages: projected,
     requests,
     state: setPendingRemoteInputs(input.state, [
@@ -242,6 +276,103 @@ export function parkRemoteInputs(input: {
       ...entries,
     ]),
   };
+}
+
+/**
+ * Signals from this step's tool results, plus calls the AI SDK resumed before
+ * the model step: those surface only as a tool result in `messages` whose
+ * output is the pending placeholder, with the full signal stashed.
+ */
+function collectRemoteInputSignals(
+  messages: readonly ModelMessage[],
+  toolResults: readonly TypedToolResult<ToolSet>[] | undefined,
+): Map<string, RemoteInputSignal> {
+  const signals = new Map<string, RemoteInputSignal>();
+  for (const toolResult of toolResults ?? []) {
+    const signal = readRemoteInputSignal(toolResult);
+    if (signal !== undefined) signals.set(toolResult.toolCallId, signal);
+  }
+  const ctx = contextStorage.getStore();
+  if (ctx === undefined) return signals;
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    for (const part of message.content) {
+      if (part.type !== "tool-result" || signals.has(part.toolCallId)) continue;
+      const stashed = readToolInterrupt(ctx, part.toolCallId);
+      if (
+        isRemoteInputSignal(stashed) &&
+        part.output.type === "text" &&
+        part.output.value === remoteInputPendingModelText(stashed.connection)
+      ) {
+        signals.set(part.toolCallId, stashed);
+      }
+    }
+  }
+  return signals;
+}
+
+function toolCallParts(messages: readonly ModelMessage[]): ToolCallPart[] {
+  return messages.flatMap((message) =>
+    message.role === "assistant" && typeof message.content !== "string"
+      ? message.content.filter((part): part is ToolCallPart => part.type === "tool-call")
+      : [],
+  );
+}
+
+/**
+ * `remote-input_<callId>` for a call's first ask, then `remote-input_<callId>_<n>`
+ * for its n-th, so every ask is a new request channels render fresh.
+ */
+function nextRemoteInputRequestId(callId: string, messages: readonly ModelMessage[]): string {
+  const base = `${REQUEST_ID_PREFIX}${callId}`;
+  let asks = 0;
+  for (const message of messages) {
+    if (message.role !== "assistant" || typeof message.content === "string") continue;
+    for (const part of message.content) {
+      if (part.type !== "tool-approval-request" || part.toolCallId !== callId) continue;
+      if (part.approvalId === base) asks = Math.max(asks, 1);
+      else if (part.approvalId.startsWith(`${base}_`)) {
+        const ask = Number(part.approvalId.slice(base.length + 1));
+        if (Number.isInteger(ask)) asks = Math.max(asks, ask);
+      }
+    }
+  }
+  return asks === 0 ? base : `${base}_${asks + 1}`;
+}
+
+/** Drops the calls, their approval requests, and the answers to them from `history`. */
+function withoutCalls(
+  history: readonly ModelMessage[],
+  calls: ReadonlyMap<string, ToolCallPart>,
+): ModelMessage[] {
+  const approvalIds = new Set<string>();
+  for (const message of history) {
+    if (message.role !== "assistant" || typeof message.content === "string") continue;
+    for (const part of message.content) {
+      if (part.type === "tool-approval-request" && calls.has(part.toolCallId)) {
+        approvalIds.add(part.approvalId);
+      }
+    }
+  }
+  return history.flatMap((message): ModelMessage[] => {
+    if (message.role === "assistant" && typeof message.content !== "string") {
+      const content = message.content.filter(
+        (part) =>
+          !(
+            (part.type === "tool-call" || part.type === "tool-approval-request") &&
+            calls.has(part.toolCallId)
+          ),
+      );
+      return content.length === 0 ? [] : [{ ...message, content }];
+    }
+    if (message.role === "tool") {
+      const content = message.content.filter(
+        (part) => part.type !== "tool-approval-response" || !approvalIds.has(part.approvalId),
+      );
+      return content.length === 0 ? [] : [{ ...message, content }];
+    }
+    return [message];
+  });
 }
 
 function readRemoteInputSignal(

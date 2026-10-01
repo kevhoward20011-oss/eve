@@ -461,6 +461,11 @@ export interface ConnectionToolExecuteOptions {
   readonly inputRetry?: {
     readonly inputResponses?: Readonly<Record<string, unknown>>;
     readonly requestState?: string;
+    /**
+     * The arguments the earlier round sent, after host-provided arguments
+     * resolved. Resent unchanged instead of resolving again. Not an MCP param.
+     */
+    readonly resolvedArguments?: unknown;
   };
 }
 

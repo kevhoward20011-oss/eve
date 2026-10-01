@@ -51,6 +51,12 @@ const MCP_INPUT_REQUIRED_BRAND = "__eveMcpInputRequired";
  */
 export interface McpInputRequiredOutcome extends McpInputRequiredResult {
   readonly [MCP_INPUT_REQUIRED_BRAND]: true;
+  /**
+   * The arguments this round sent, after host-provided arguments resolved.
+   * Pass them back as `inputRetry.resolvedArguments` so the retry sends the
+   * same arguments the server bound `requestState` to. Never shown to a model.
+   */
+  readonly resolvedArguments: unknown;
 }
 
 export function isMcpInputRequiredOutcome(value: unknown): value is McpInputRequiredOutcome {
@@ -215,12 +221,19 @@ export class McpConnectionClient implements ConnectionClient {
       }
       const execute = sdkTool.execute;
 
-      const resolvedArgs = await resolveProvidedArguments({
-        args,
-        callId: options.callId,
-        connection: this.#connection,
-        toolName,
-      });
+      const retry = options.inputRetry;
+      // A retry resends the first round's arguments as-is: the server bound
+      // its `requestState` to them, and a provided-arguments callback may not
+      // return the same values twice.
+      const resolvedArgs =
+        retry?.resolvedArguments !== undefined
+          ? retry.resolvedArguments
+          : await resolveProvidedArguments({
+              args,
+              callId: options.callId,
+              connection: this.#connection,
+              toolName,
+            });
 
       const outcome = await runMcpRequestScope({
         execute: async () =>
@@ -239,11 +252,19 @@ export class McpConnectionClient implements ConnectionClient {
             protocolVersion: this.#client?.initializeResult?.protocolVersion,
             toolName,
           }),
-        retry: options.inputRetry,
+        // Only the MRTR fields go on the wire.
+        retry:
+          retry === undefined
+            ? undefined
+            : { inputResponses: retry.inputResponses, requestState: retry.requestState },
       });
       if (outcome.status === "completed") return outcome.value;
       const { status: _status, ...result } = outcome;
-      return { ...result, [MCP_INPUT_REQUIRED_BRAND]: true } satisfies McpInputRequiredOutcome;
+      return {
+        ...result,
+        [MCP_INPUT_REQUIRED_BRAND]: true,
+        resolvedArguments: resolvedArgs,
+      } satisfies McpInputRequiredOutcome;
     } catch (error) {
       return await this.#rethrowClassified(error);
     }

@@ -2556,8 +2556,10 @@ async function handleStepResult(input: {
     providerExecutedOutcomeIds,
   });
   // Remote input interrupts become approval requests on their calls; the
-  // journaled retry payload lives on state, never in model history.
+  // journaled retry payload lives on state, never in model history. A resumed
+  // call that asks again moves out of `promptMessages` to re-park.
   const remoteInput = parkRemoteInputs({
+    history: promptMessages,
     messages: normalizedProviderHistory.messages,
     responder: currentRequester(),
     state: session.state,
@@ -2597,7 +2599,7 @@ async function handleStepResult(input: {
       : responseMessages.slice(0, pendingResponseStart);
   const pendingResponseMessages = responseMessages.slice(committedResponseMessages.length);
   const parkedInputHistory: HarnessModelMessage[] = validateHarnessModelMessages([
-    ...promptMessages,
+    ...(remoteInput?.history ?? promptMessages),
     ...committedResponseMessages,
     ...(pendingApprovals === undefined
       ? []
