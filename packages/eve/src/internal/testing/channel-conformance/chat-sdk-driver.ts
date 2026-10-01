@@ -156,7 +156,8 @@ function fakeAdapter(
     async removeReaction() {},
     async startTyping() {},
   };
-  const adapter = self as unknown as Adapter;
+  // Chat SDK adapters have many optional members; the fake implements the ones eve calls.
+  const adapter: Adapter = self as typeof self & Adapter;
   return adapter;
 }
 
