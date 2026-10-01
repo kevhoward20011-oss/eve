@@ -6,6 +6,7 @@
   "rule19_asyncLocalStorageAllowlist": [
     "packages/eve/src/context/container.ts",
     "packages/eve/src/public/channels/slack/slackChannel.ts",
+    "packages/eve/src/runtime/connections/mcp-input-required.ts",
     "packages/eve/src/runtime/sessions/runtime-session.ts"
   ],
   "rule21_authoredNameAllowlist": [],

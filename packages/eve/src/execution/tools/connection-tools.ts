@@ -11,6 +11,10 @@ import {
   isConnectionAuthorizationRequiredError,
 } from "#connections/errors.js";
 import { loadContext } from "#context/container.js";
+import { CapabilitiesKey } from "#context/keys.js";
+import { requestRemoteInput, takeRemoteInputContinuation } from "#harness/remote-input.js";
+import { isMcpInputRequiredOutcome } from "#runtime/connections/mcp-client.js";
+import { planMcpInput, type McpInputRetry } from "#runtime/connections/mcp-input-required.js";
 import { ConnectionRegistryKey } from "#context/providers/connection-key.js";
 import { getAuthorizationResults, type AuthorizationSignal } from "#harness/authorization.js";
 import { reportNestedToolAction } from "#harness/nested-actions.js";
@@ -57,6 +61,11 @@ import {
 const log = createLogger("framework.connection-tools");
 
 export const CONNECTION_SEARCH_TOOL_NAME = "connection_search";
+
+/** Bound on `input_required` rounds that carry only `requestState`. */
+const MAX_STATE_ONLY_RETRIES = 3;
+/** Bound on how many times one call asks its user (re-asks after unfinished sign-in). */
+const MAX_REMOTE_INPUT_ASKS = 3;
 
 const DEFAULT_SEARCH_LIMIT = 10;
 const MAX_SEARCH_LIMIT = 50;
@@ -362,21 +371,69 @@ async function executeConnectionTool(
   const input = await validToolInput(connection, tool, target.input);
 
   const toolName = qualifiedToolName(target);
+  const fail = (message: string): never => {
+    reportNestedToolAction(ctx.callId, { input, isError: true, output: message, toolName });
+    throw new Error(message);
+  };
+  const continuation = takeRemoteInputContinuation(ctx.callId);
+  let attempt = continuation?.attempt ?? 0;
+  let inputRetry: McpInputRetry | undefined =
+    continuation === undefined
+      ? undefined
+      : { inputResponses: continuation.inputResponses, requestState: continuation.requestState };
   let raw: unknown;
-  try {
-    raw = await client.executeTool(tool.name, input, {
-      abortSignal: ctx.abortSignal,
-      callId: ctx.callId,
+  for (let stateOnlyRetries = 0; ;) {
+    try {
+      raw = await client.executeTool(tool.name, input, {
+        abortSignal: ctx.abortSignal,
+        callId: ctx.callId,
+        inputRetry,
+      });
+    } catch (error) {
+      if (isConnectionAuthorizationRequiredError(error)) {
+        return await auth.handleError(error, scoped);
+      }
+      reportNestedToolAction(ctx.callId, {
+        input,
+        isError: true,
+        output: toErrorMessage(error),
+        toolName,
+      });
+      throw error;
+    }
+    if (!isMcpInputRequiredOutcome(raw)) break;
+
+    const plan = planMcpInput(raw);
+    if (plan.kind === "unsupported") {
+      return fail(`${toolName} needs input eve cannot ask for: ${plan.reason}.`);
+    }
+    if (plan.kind === "retry") {
+      // State-only rounds carry no question; retry with the state, bounded.
+      if (++stateOnlyRetries > MAX_STATE_ONLY_RETRIES) {
+        return fail(`${toolName} kept asking to retry without saying what it needs.`);
+      }
+      inputRetry = { requestState: raw.requestState };
+      continue;
+    }
+    // No person can answer this run (a schedule, an unattended caller).
+    if (loadContext().get(CapabilitiesKey)?.requestInput !== true) {
+      return fail(
+        `${toolName} needs the user to ${plan.kind === "sign-in" ? "sign in" : "approve it"}, ` +
+          "but this session cannot ask anyone, such as a scheduled run.",
+      );
+    }
+    if (++attempt > MAX_REMOTE_INPUT_ASKS) {
+      return fail(`${toolName} asked for input ${MAX_REMOTE_INPUT_ASKS} times without finishing.`);
+    }
+    return requestRemoteInput({
+      approve: { attempt, inputResponses: plan.approve, requestState: raw.requestState },
+      connection: connection.connectionName,
+      prompt:
+        plan.kind === "sign-in"
+          ? `${plan.message ?? `${toolName} needs you to sign in.`}\n\nSign in at ${plan.url}, ` +
+            "then approve to continue."
+          : plan.prompt,
     });
-  } catch (error) {
-    if (isConnectionAuthorizationRequiredError(error)) return await auth.handleError(error, scoped);
-    reportNestedToolAction(ctx.callId, {
-      input,
-      isError: true,
-      output: toErrorMessage(error),
-      toolName,
-    });
-    throw error;
   }
 
   const result = toConnectionToolResult(connection.protocol, tool, raw);

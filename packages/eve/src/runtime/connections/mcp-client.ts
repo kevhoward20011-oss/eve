@@ -17,6 +17,21 @@ import {
   withMcpToolCallSpan,
   withMcpToolsListSpan,
 } from "#runtime/connections/mcp-tracing.js";
+import {
+  createMcpInputRequiredFetch,
+  hasScopedInputRequired,
+  MRTR_CLIENT_CAPABILITIES,
+  runMcpRequestScope,
+  type McpInputRequiredResult,
+} from "#runtime/connections/mcp-input-required.js";
+import {
+  encodeForwardedPrincipalHeader,
+  FORWARDED_PRINCIPAL_HEADER,
+  readForwardedPrincipal,
+  readToolSessionKey,
+  TOOL_SESSION_META_KEY,
+  TOOL_SESSIONS_EXTENSION,
+} from "#runtime/connections/mcp-forwarding.js";
 import type {
   AuthorizationDefinition,
   ConnectionClient,
@@ -26,6 +41,27 @@ import type {
   HeaderValue,
   ToolFilterDefinition,
 } from "#shared/connection-types.js";
+
+const MCP_INPUT_REQUIRED_BRAND = "__eveMcpInputRequired";
+
+/**
+ * Returned by {@link McpConnectionClient.executeTool} when the server answered
+ * `input_required` instead of a result. The caller decides how to collect the
+ * input; `requestState` must reach only the retry, never a model.
+ */
+export interface McpInputRequiredOutcome extends McpInputRequiredResult {
+  readonly [MCP_INPUT_REQUIRED_BRAND]: true;
+}
+
+export function isMcpInputRequiredOutcome(value: unknown): value is McpInputRequiredOutcome {
+  return isObject(value) && value[MCP_INPUT_REQUIRED_BRAND] === true;
+}
+
+/** Client capabilities: MRTR input modes plus eve's tool-session extension. */
+const CLIENT_CAPABILITIES = {
+  ...MRTR_CLIENT_CAPABILITIES,
+  extensions: { [TOOL_SESSIONS_EXTENSION]: {} },
+};
 
 interface McpToolCache {
   readonly metadata: readonly ConnectionToolMetadata[];
@@ -78,13 +114,17 @@ export class McpConnectionClient implements ConnectionClient {
   async #createClient(): Promise<MCPClient> {
     const headers = await resolveHeaders(this.#connection);
     const url = this.#connection.url;
+    const connectionName = this.#connection.connectionName;
     const fetch = createMcpTraceFetch({
-      connectionName: this.#connection.connectionName,
+      connectionName,
+      fetcher: createMcpInputRequiredFetch(this.#forwardingFetch()),
       getProtocolVersion: () => this.#client?.initializeResult?.protocolVersion,
+      requestMeta: (method) => this.#toolSessionMeta(method),
     });
 
     try {
       return await createMCPClient({
+        capabilities: CLIENT_CAPABILITIES,
         protocolVersionDiscovery: this.#connection.protocolVersionDiscovery,
         transport: { fetch, headers, type: "http", url },
       });
@@ -93,10 +133,43 @@ export class McpConnectionClient implements ConnectionClient {
         throw error;
       }
       return await createMCPClient({
+        capabilities: CLIENT_CAPABILITIES,
         protocolVersionDiscovery: this.#connection.protocolVersionDiscovery,
         transport: { fetch, headers, type: "sse", url },
       });
     }
+  }
+
+  /**
+   * Adds `eve-forwarded-principal` to every request when the connection sets
+   * `forwardPrincipal`, read per request: one client can serve turns from
+   * different people in a shared session.
+   */
+  #forwardingFetch(): typeof fetch {
+    const base: typeof fetch = (request, init) => globalThis.fetch(request, init);
+    if (this.#connection.forwardPrincipal !== true) return base;
+    const connectionName = this.#connection.connectionName;
+    return async (request, init) => {
+      const principal = readForwardedPrincipal();
+      if (principal === undefined) return await base(request, init);
+      const headers = new Headers(init?.headers);
+      headers.set(
+        FORWARDED_PRINCIPAL_HEADER,
+        encodeForwardedPrincipalHeader(principal, connectionName),
+      );
+      return await base(request, { ...init, headers });
+    };
+  }
+
+  /** The tool-session key, sent only to servers that advertise the extension. */
+  #toolSessionMeta(method: string): Readonly<Record<string, unknown>> | undefined {
+    if (method !== "tools/call" && method !== "resources/read") return undefined;
+    const extensions = this.#client?.initializeResult?.capabilities?.["extensions"];
+    if (!isObject(extensions) || extensions[TOOL_SESSIONS_EXTENSION] === undefined) {
+      return undefined;
+    }
+    const key = readToolSessionKey(this.#connection.connectionName);
+    return key === undefined ? undefined : { [TOOL_SESSION_META_KEY]: key };
   }
 
   /**
@@ -116,6 +189,10 @@ export class McpConnectionClient implements ConnectionClient {
   /**
    * Executes a named tool through the AI SDK's tool executor, which
    * handles the JSON-RPC `tools/call` internally.
+   *
+   * When the server answers `input_required`, returns an
+   * {@link McpInputRequiredOutcome} instead of a result. Pass the answers
+   * back as `options.inputRetry` to retry the call.
    *
    * A `401`/`invalid_token` from the remote server is translated into
    * {@link ConnectionAuthorizationRequiredError} via {@link #rethrowClassified}
@@ -145,14 +222,28 @@ export class McpConnectionClient implements ConnectionClient {
         toolName,
       });
 
-      return await withMcpToolCallSpan({
-        arguments: args,
-        connectionName: this.#connection.connectionName,
+      const outcome = await runMcpRequestScope({
         execute: async () =>
-          await execute(resolvedArgs, { abortSignal: options.abortSignal } as never),
-        protocolVersion: this.#client?.initializeResult?.protocolVersion,
-        toolName,
+          await withMcpToolCallSpan({
+            arguments: args,
+            connectionName: this.#connection.connectionName,
+            execute: async () => {
+              try {
+                return await execute(resolvedArgs, { abortSignal: options.abortSignal } as never);
+              } catch (error) {
+                // Not a failure: the span records the result type, never `requestState`.
+                if (hasScopedInputRequired()) return { resultType: "input_required" };
+                throw error;
+              }
+            },
+            protocolVersion: this.#client?.initializeResult?.protocolVersion,
+            toolName,
+          }),
+        retry: options.inputRetry,
       });
+      if (outcome.status === "completed") return outcome.value;
+      const { status: _status, ...result } = outcome;
+      return { ...result, [MCP_INPUT_REQUIRED_BRAND]: true } satisfies McpInputRequiredOutcome;
     } catch (error) {
       return await this.#rethrowClassified(error);
     }

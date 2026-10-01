@@ -144,10 +144,12 @@ import {
   appendPendingInputBatch,
 } from "#harness/input-requests.js";
 import {
+  currentRequester,
   getPendingInputBatches,
   queueDeferredStepInput,
   type PendingInputBatchEvent,
 } from "#harness/pending-input-batches.js";
+import { loadRemoteInputContinuations, parkRemoteInputs } from "#harness/remote-input.js";
 import {
   convertStaleResponsesToUserMessage,
   dropStaleSessionLimitContinuationResponses,
@@ -1081,6 +1083,13 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       return continuation.result;
     }
     session = continuation.session;
+    // Approved remote inputs become continuations the re-run calls read.
+    session = loadRemoteInputContinuations({
+      context: store,
+      pendingRequestIds: getPendingInputRequestIds(session.state),
+      resolved: pending.resolvedInputs,
+      session,
+    });
 
     if (!hasUnansweredToolCall(messages)) {
       const taskContext = await appendTaskContext({
@@ -2546,11 +2555,20 @@ async function handleStepResult(input: {
     messages: rawResponseMessages,
     providerExecutedOutcomeIds,
   });
-  const responseMessages = normalizedProviderHistory.messages;
+  // Remote input interrupts become approval requests on their calls; the
+  // journaled retry payload lives on state, never in model history.
+  const remoteInput = parkRemoteInputs({
+    messages: normalizedProviderHistory.messages,
+    responder: currentRequester(),
+    state: session.state,
+    toolResults: result.toolResults,
+  });
+  const responseMessages = remoteInput?.messages ?? normalizedProviderHistory.messages;
 
   const baseSession = setRequestEnvelopeTokens(
     {
       ...session,
+      state: remoteInput?.state ?? session.state,
       compaction: createNextCompactionConfig(
         session.compaction,
         input.durableModelPromptMessageCount,
@@ -2566,8 +2584,10 @@ async function handleStepResult(input: {
     content: result.content ?? [],
     excludedCallIds: invalidInputToolCallIds,
   });
-  const inputRequests: InputRequest[] = approvalRequests;
-  const pendingApprovals = renderPendingApprovalsSnippet(approvalRequests);
+  // Remote requests stay out of `responsePolicyRequestIds`: the responder
+  // check for them is built in, not the tool's response policy.
+  const inputRequests: InputRequest[] = [...approvalRequests, ...(remoteInput?.requests ?? [])];
+  const pendingApprovals = renderPendingApprovalsSnippet(inputRequests);
   // Keep outcomes from resumed work ahead of the framework pending-approval
   // message; only the unresolved assistant response belongs to the parked batch.
   const pendingResponseStart = responseMessages.findIndex((message) => message.role !== "tool");
@@ -2589,7 +2609,7 @@ async function handleStepResult(input: {
   });
   // Only unanswered calls can dispatch: automatic denials already have results.
   const blockedCallIds = new Set([
-    ...approvalRequests.map((request) => request.action.callId),
+    ...inputRequests.map((request) => request.action.callId),
     ...extractToolResultCallIds(responseMessages),
   ]);
   const deferredToolCalls = ((result.toolCalls ?? []) as TypedToolCall<ToolSet>[])

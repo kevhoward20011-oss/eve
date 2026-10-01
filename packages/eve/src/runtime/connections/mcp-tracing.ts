@@ -44,6 +44,11 @@ export function createMcpTraceFetch(input: {
   readonly getActiveContext?: () => Context;
   readonly getProtocolVersion: () => string | undefined;
   readonly injectContext?: McpTraceContextInjector;
+  /**
+   * Extra `_meta` entries for one request, such as the tool-session key.
+   * Applied even when trace context is skipped for size.
+   */
+  readonly requestMeta?: (method: string) => Readonly<Record<string, unknown>> | undefined;
 }): typeof fetch {
   const fetcher = input.fetcher ?? ((request, init) => globalThis.fetch(request, init));
   const getActiveContext = input.getActiveContext ?? (() => otelContext.active());
@@ -54,7 +59,12 @@ export function createMcpTraceFetch(input: {
     if (message === undefined) return await fetcher(request, init);
 
     const activeContext = getActiveContext();
-    const propagated = injectMcpTraceContext(message, activeContext, injectContext);
+    const propagated = injectMcpTraceContext(
+      message,
+      activeContext,
+      injectContext,
+      input.requestMeta?.(message.method),
+    );
     const annotateRequest =
       message.method === "tools/call" || mcpMethodName(activeContext) === message.method;
     if (annotateRequest) {
@@ -91,24 +101,33 @@ function injectMcpTraceContext(
   message: JsonRpcRequest,
   activeContext: Context,
   injectContext: McpTraceContextInjector = injectOpenTelemetryTraceContext,
+  extraMeta?: Readonly<Record<string, unknown>>,
 ): JsonRpcRequest | undefined {
-  if (!withinTraceRequestLimit(JSON.stringify(message))) return undefined;
-
   if (message.params !== undefined && !isObject(message.params)) return undefined;
-  const propagated: Record<string, string> = {};
-  injectContext(activeContext, propagated);
-  if (!withinTraceContextLimit(propagated)) return undefined;
-  stripEveTraceBaggage(propagated);
-
+  const propagated = readTraceContext(message, activeContext, injectContext);
+  if (propagated === undefined && extraMeta === undefined) return undefined;
   const params = isObject(message.params) ? message.params : {};
   const existingMeta = isObject(params["_meta"]) ? params["_meta"] : {};
   return {
     ...message,
     params: {
       ...params,
-      _meta: { ...existingMeta, ...propagated },
+      _meta: { ...existingMeta, ...extraMeta, ...propagated },
     },
   };
+}
+
+function readTraceContext(
+  message: JsonRpcRequest,
+  activeContext: Context,
+  injectContext: McpTraceContextInjector,
+): Record<string, string> | undefined {
+  if (!withinTraceRequestLimit(JSON.stringify(message))) return undefined;
+  const propagated: Record<string, string> = {};
+  injectContext(activeContext, propagated);
+  if (!withinTraceContextLimit(propagated)) return undefined;
+  stripEveTraceBaggage(propagated);
+  return propagated;
 }
 
 export async function withMcpToolsListSpan<T>(input: {

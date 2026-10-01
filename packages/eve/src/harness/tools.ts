@@ -15,6 +15,12 @@ import {
   modelFacingAuthorizationOutput,
 } from "#harness/authorization.js";
 import { stashToolInterrupt } from "#harness/tool-interrupts.js";
+import {
+  isRemoteInputPendingOutput,
+  isRemoteInputSignal,
+  modelFacingRemoteInputOutput,
+  remoteInputPendingModelText,
+} from "#harness/remote-input.js";
 import { isApprovedToolCall, markApprovalRecheck } from "#harness/approval-recheck.js";
 import { toModelSchema } from "#tools/schema.js";
 import { normalizeToolJsonOutput, normalizeToolModelOutput } from "#harness/tool-model-output.js";
@@ -77,6 +83,12 @@ export function buildToolSet(input: {
                 return {
                   type: "text" as const,
                   value: authorizationPendingModelText(output.connections),
+                };
+              }
+              if (isRemoteInputPendingOutput(output)) {
+                return {
+                  type: "text" as const,
+                  value: remoteInputPendingModelText(output.connection),
                 };
               }
               if (authorToModelOutput !== undefined) {
@@ -195,6 +207,10 @@ function normalizeToolExecuteOutput(
   if (isAuthorizationSignal(output)) {
     stashToolInterrupt(loadContext(), options.toolCallId, output);
     return modelFacingAuthorizationOutput(output);
+  }
+  if (isRemoteInputSignal(output)) {
+    stashToolInterrupt(loadContext(), options.toolCallId, output);
+    return modelFacingRemoteInputOutput(output);
   }
   return normalizeToolJsonOutput({
     boundary: "execute",

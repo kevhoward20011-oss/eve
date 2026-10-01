@@ -68,6 +68,11 @@ function makeConnection(
   };
 }
 
+const EXPECTED_CLIENT_CAPABILITIES = {
+  elicitation: { form: {}, url: {} },
+  extensions: { "dev.eve/tool-sessions": {} },
+};
+
 describe("McpConnectionClient", () => {
   beforeEach(() => {
     createMCPClient.mockReset();
@@ -196,6 +201,7 @@ describe("McpConnectionClient", () => {
     await expect(mcpClient.connect()).resolves.toBe(client);
     expect(createMCPClient).toHaveBeenCalledTimes(1);
     expect(createMCPClient).toHaveBeenCalledWith({
+      capabilities: EXPECTED_CLIENT_CAPABILITIES,
       protocolVersionDiscovery: undefined,
       transport: {
         fetch: expect.any(Function),
@@ -224,6 +230,7 @@ describe("McpConnectionClient", () => {
 
     await expect(mcpClient.connect()).resolves.toBe(client);
     expect(createMCPClient).toHaveBeenNthCalledWith(1, {
+      capabilities: EXPECTED_CLIENT_CAPABILITIES,
       protocolVersionDiscovery: undefined,
       transport: {
         fetch: expect.any(Function),
@@ -233,6 +240,7 @@ describe("McpConnectionClient", () => {
       },
     });
     expect(createMCPClient).toHaveBeenNthCalledWith(2, {
+      capabilities: EXPECTED_CLIENT_CAPABILITIES,
       protocolVersionDiscovery: undefined,
       transport: {
         fetch: expect.any(Function),
@@ -259,6 +267,7 @@ describe("McpConnectionClient", () => {
     await expect(mcpClient.connect()).resolves.toBe(client);
     expect(createMCPClient).toHaveBeenCalledTimes(2);
     expect(createMCPClient).toHaveBeenNthCalledWith(2, {
+      capabilities: EXPECTED_CLIENT_CAPABILITIES,
       protocolVersionDiscovery: undefined,
       transport: {
         fetch: expect.any(Function),
@@ -283,6 +292,7 @@ describe("McpConnectionClient", () => {
     await expect(mcpClient.connect()).resolves.toBe(client);
     expect(createMCPClient).toHaveBeenCalledTimes(2);
     expect(createMCPClient).toHaveBeenNthCalledWith(2, {
+      capabilities: EXPECTED_CLIENT_CAPABILITIES,
       protocolVersionDiscovery: undefined,
       transport: {
         fetch: expect.any(Function),
@@ -309,6 +319,7 @@ describe("McpConnectionClient", () => {
     await expect(mcpClient.connect()).resolves.toBe(client);
     expect(createMCPClient).toHaveBeenCalledTimes(2);
     expect(createMCPClient).toHaveBeenNthCalledWith(2, {
+      capabilities: EXPECTED_CLIENT_CAPABILITIES,
       protocolVersionDiscovery: undefined,
       transport: {
         fetch: expect.any(Function),
@@ -330,6 +341,7 @@ describe("McpConnectionClient", () => {
     await expect(mcpClient.connect()).rejects.toBe(error);
     expect(createMCPClient).toHaveBeenCalledTimes(1);
     expect(createMCPClient).toHaveBeenCalledWith({
+      capabilities: EXPECTED_CLIENT_CAPABILITIES,
       protocolVersionDiscovery: undefined,
       transport: {
         fetch: expect.any(Function),

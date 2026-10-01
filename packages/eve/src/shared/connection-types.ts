@@ -454,6 +454,14 @@ export interface ConnectionToolExecuteOptions {
   readonly abortSignal?: AbortSignal;
   /** Replay-stable id of the authored tool call. */
   readonly callId: string;
+  /**
+   * MCP only: the answers to the server's earlier `input_required` for this
+   * call, sent as `inputResponses` with its `requestState` on the retry.
+   */
+  readonly inputRetry?: {
+    readonly inputResponses?: Readonly<Record<string, unknown>>;
+    readonly requestState?: string;
+  };
 }
 
 /** A live client for a single connection. */

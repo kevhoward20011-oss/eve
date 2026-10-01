@@ -35,6 +35,13 @@ export interface McpClientConnectionDefinition {
    */
   readonly protocolVersionDiscovery?: boolean;
   /**
+   * Whether to forward the calling turn's principals to the server in the
+   * `eve-forwarded-principal` header, so an eve agent's `mcpChannel` can run
+   * the call as that user. The server adopts them only when its
+   * `trustedForwarders` predicate trusts this deployment. Defaults to `false`.
+   */
+  readonly forwardPrincipal?: boolean;
+  /**
    * Human-readable summary of the connection and its tools.
    *
    * The model sees it in the connection listing eve announces, so it
