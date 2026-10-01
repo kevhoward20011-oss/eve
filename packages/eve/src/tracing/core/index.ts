@@ -4,6 +4,7 @@ export { createTraceEngine } from "#tracing/core/engine.js";
 export * from "#tracing/core/contract.js";
 export type { TraceOperation } from "#tracing/core/engine.js";
 export { createTraceLifecycle } from "#tracing/core/scopes.js";
+export { createTransportLifecycle } from "#tracing/core/transports.js";
 export type {
   StepScope,
   ActionScope,

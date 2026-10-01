@@ -88,6 +88,15 @@ The integration layer uses the same runtime scope constructors. It projects exis
 turn, action, and approval records into semantic bindings. Existing workflow
 state remains the sole persistence owner; no second checkpoint tree is added.
 
+Use `lifecycle.resolve(record, { executionContext })` to reconstruct a semantic
+checkpoint record from an external runtime. Record conversion belongs in the
+checkpointer adapter. Construct ordinary children directly from the resolved
+parent; the lifecycle inherits attempt and output context automatically.
+
+Transport adapters use `createTransportLifecycle().request()` or `.mcp()`.
+They supply protocol data, not span names or OTel options. The backend remains
+the only component that starts OTel spans.
+
 ## Compatibility and transports
 
 Neutral output uses schema version 1. The optional eve output profile retains

@@ -13,6 +13,7 @@ import {
 import { durableOtelBackend, liveOtelBackend } from "#tracing/adapters/otel.js";
 import { aiSdkContentSerializer } from "#tracing/adapters/serializer.js";
 import { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
+import { eveOutputMapping } from "#tracing/core/profiles/eve.js";
 
 describe("constructed agent trace scopes", () => {
   it("constructs a complete callback topology without exposing spans or persistence", async () => {
@@ -195,6 +196,58 @@ describe("constructed agent trace scopes", () => {
         original.spanId,
       );
       expect(JSON.stringify(spans.map((span) => span.attributes))).not.toContain("secret");
+    } finally {
+      await provider.shutdown();
+    }
+  });
+
+  it("resolves an external checkpoint record and inherits output attribution through construction", async () => {
+    const exporter = new InMemorySpanExporter();
+    const idGenerator = new AgentSpanIdGenerator();
+    const provider = new BasicTracerProvider({
+      idGenerator,
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    try {
+      const lifecycle = createTraceLifecycle({
+        serializer: aiSdkContentSerializer,
+        backend: durableOtelBackend({
+          tracer: provider.getTracer("records"),
+          idGenerator,
+          samplesTrace: () => true,
+          mapping: eveOutputMapping(),
+        }),
+      });
+      const record: ScopeRecord = {
+        key: "step",
+        identity: {
+          conversationId: "conversation",
+          runId: "run",
+          turnId: "turn",
+          agentName: "support",
+          framework: { name: "custom", version: "1" },
+        },
+        data: { type: "step", options: { index: 0 } },
+        capture: { emit: true, recordInputs: false, recordOutputs: false },
+        reference: { traceId: "1".repeat(32), spanId: "2".repeat(16), traceFlags: 1 },
+        parent: { traceId: "1".repeat(32), spanId: "3".repeat(16), traceFlags: 1 },
+        startTimeMs: Date.now(),
+        outputContext: { platform: "vercel", traceSessionId: "remote-session" },
+      };
+      const step = await lifecycle.resolve(record);
+      const model = await step.model({ provider: "provider", modelId: "model" });
+      await model.completed({ model: { finishReason: "stop", usage: {} } });
+      await step.completed();
+      const spans = exporter.getFinishedSpans();
+      expect(spans.every((span) => span.attributes["vercel.session_id"] === "remote-session")).toBe(
+        true,
+      );
+      expect(spans.find((span) => span.name === "chat model")!.parentSpanContext?.spanId).toBe(
+        record.reference.spanId,
+      );
+      expect(spans.find((span) => span.name === "agent.step")!.spanContext().spanId).toBe(
+        record.reference.spanId,
+      );
     } finally {
       await provider.shutdown();
     }

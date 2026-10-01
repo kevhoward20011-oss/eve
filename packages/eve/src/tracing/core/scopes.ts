@@ -164,6 +164,8 @@ export interface ScopeRecord {
   readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number };
   readonly childIndex?: number;
   readonly stepIndex?: number;
+  readonly outputContext?: Readonly<Record<string, string>>;
+  readonly content?: { readonly recordInputs: boolean; readonly recordOutputs: boolean };
 }
 
 export interface TraceCheckpointer {
@@ -255,14 +257,15 @@ export function createTraceLifecycle(input: {
       startTimeMs,
       links,
     );
-    prepared = { ...prepared, outputContext: binding?.outputContext };
-    if (actualData.type === "activation" && binding?.content !== undefined) {
+    prepared = { ...prepared, outputContext: saved?.outputContext ?? binding?.outputContext };
+    const content = saved?.content ?? binding?.content;
+    if (actualData.type === "activation" && content !== undefined) {
       prepared = {
         ...prepared,
         attributes: {
           ...prepared.attributes,
-          "agent.trace.content.input": binding.content.recordInputs,
-          "agent.trace.content.output": binding.content.recordOutputs,
+          "agent.trace.content.input": content.recordInputs,
+          "agent.trace.content.output": content.recordOutputs,
         },
       };
     }
@@ -298,6 +301,8 @@ export function createTraceLifecycle(input: {
       attempt: actualAttempt,
       startTimeMs,
       links,
+      outputContext: binding?.outputContext,
+      content,
     };
     if (input.checkpointer !== undefined && saved === undefined)
       await input.checkpointer.save(record);
@@ -327,14 +332,11 @@ export function createTraceLifecycle(input: {
         childData.type === "step"
           ? { index: childData.options.index, attempt: childData.options.attempt ?? 0 }
           : actualAttempt;
-      const next = await construct(
-        actualIdentity,
-        actualCapture,
-        childData,
-        runtime,
-        nextAttempt,
-        childBinding ?? { key: `${key}:${childData.type}:${childIndex++}` },
-      );
+      const next = await construct(actualIdentity, actualCapture, childData, runtime, nextAttempt, {
+        ...(childBinding ?? { key: `${key}:${childData.type}:${childIndex++}` }),
+        outputContext:
+          childBinding?.outputContext ?? record?.outputContext ?? binding?.outputContext,
+      });
       if (input.checkpointer !== undefined) {
         record = { ...record!, childIndex, stepIndex };
         await input.checkpointer.save(record);
@@ -637,6 +639,25 @@ export function createTraceLifecycle(input: {
   }
 
   return {
+    resolve(
+      record: ScopeRecord,
+      options: {
+        readonly deferred?: boolean;
+        readonly executionContext?: import("#tracing/core/types.js").ExecutionContext;
+      } = {},
+    ) {
+      return construct(record.identity, record.capture, record.data, undefined, record.attempt, {
+        key: record.key,
+        reference: record.reference,
+        parent: record.parent,
+        startTimeMs: record.startTimeMs,
+        links: record.links,
+        outputContext: record.outputContext,
+        content: record.content,
+        deferred: options.deferred,
+        executionContext: options.executionContext,
+      });
+    },
     turn(
       identity: ScopeIdentity,
       options: TurnMetadata,

@@ -1,81 +1,32 @@
-import { createTraceEngine } from "#tracing/core/engine.js";
-import {
-  requestAttributes,
-  requestStatusAttributes,
-  mcpAttributes,
-  mcpName,
-  applyAttributes,
-  SPAN_NAMES,
-} from "#tracing/core/contract.js";
-import type {
-  Attributes,
-  CaptureDecision,
-  TraceBackend,
-  TraceReference,
-} from "#tracing/core/types.js";
+import { createTransportLifecycle } from "#tracing/core/transports.js";
+import type { TraceBackend } from "#tracing/core/types.js";
 
 export function createTransportTracing(backend: TraceBackend) {
-  const engine = createTraceEngine({ backend });
+  const lifecycle = createTransportLifecycle(backend);
   return {
     async request<T extends { status: number }>(
-      input: {
-        method: string;
-        route: string;
-        parent?: TraceReference;
-        scheme?: string;
-        serverAddress?: string;
+      input: Parameters<typeof lifecycle.request>[0] & {
         channelName?: string;
         channelKind?: string;
       },
       execute: () => Promise<T>,
     ): Promise<T> {
-      const capture = { emit: true, recordInputs: false, recordOutputs: false };
-      const operation = engine.start(
-        {
-          type: "channelRequest",
-          operationId: `${input.method} ${input.route}`,
-          name: SPAN_NAMES.channelRequest,
-          kind: "SERVER",
-          parent: input.parent,
-          attributes: requestAttributes(input),
-        },
-        capture,
-      );
+      const operation = lifecycle.request(input);
+      operation.channel(input);
       try {
         const response = await operation.run(execute);
-        applyAttributes(operation, requestStatusAttributes(response.status));
-        if (response.status >= 500) operation.setStatus("ERROR");
+        operation.completed(response.status);
         return response;
       } catch (error) {
-        operation.setStatus("ERROR");
+        operation.failed();
         throw error;
-      } finally {
-        operation.end();
       }
     },
     async mcp<T>(
-      input: {
-        method: "tools/list" | "tools/call";
-        connectionName: string;
-        toolName?: string;
-        protocolVersion?: string;
-        parent?: TraceReference;
-        capture: CaptureDecision;
-        attributes?: Attributes;
-      },
+      input: Parameters<typeof lifecycle.mcp>[0],
       execute: () => Promise<T>,
     ): Promise<T> {
-      const operation = engine.start(
-        {
-          type: "mcp",
-          operationId: `${input.connectionName}:${input.method}`,
-          name: mcpName(input.method, input.toolName),
-          kind: "CLIENT",
-          parent: input.parent,
-          attributes: { ...input.attributes, ...mcpAttributes(input) },
-        },
-        input.capture,
-      );
+      const operation = lifecycle.mcp(input);
       try {
         return await operation.run(execute);
       } catch (error) {
