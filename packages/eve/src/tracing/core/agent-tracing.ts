@@ -12,6 +12,14 @@ import type {
   TraceLink,
   TraceReference,
 } from "#tracing/core/types.js";
+import { createTransportLifecycle } from "#tracing/core/transports.js";
+
+type Integrations = Readonly<Record<string, (scope: TurnScope) => unknown>>;
+export interface TracingAdapter<TIntegrations extends Integrations = Integrations> {
+  readonly backend: TraceBackend;
+  readonly serializer: ContentSerializer;
+  readonly integrations?: TIntegrations;
+}
 
 export interface TurnInput extends RunIdentity {
   readonly sequence: number;
@@ -23,18 +31,53 @@ export interface TurnInput extends RunIdentity {
 export type ActivationMetadata = TurnMetadata;
 export type { TurnScope } from "#tracing/core/scopes.js";
 
-export function createAgentTracing(input: {
-  readonly agentName: string;
-  readonly framework: FrameworkIdentity;
-  readonly backend: TraceBackend;
-  readonly serializer: ContentSerializer;
+export function createAgentTracing<
+  TIntegrations extends Integrations = Record<never, never>,
+>(input: {
+  readonly agentName?: string;
+  readonly framework?: FrameworkIdentity;
+  readonly adapter: TracingAdapter<TIntegrations>;
   readonly checkpointer?: TraceCheckpointer;
   readonly content?: { readonly recordInputs: boolean; readonly recordOutputs: boolean };
   readonly diagnostic?: (code: string) => void;
 }) {
-  const runtime = createTraceLifecycle(input);
+  const runtime = createTraceLifecycle({ ...input, ...input.adapter });
+  const transports = createTransportLifecycle(input.adapter.backend, input.adapter.serializer);
   return {
-    lifecycle: runtime,
+    lifecycle: { ...runtime, ...transports },
+    integrations: input.adapter.integrations ?? ({} as TIntegrations),
+    async request<T extends { status: number }>(
+      options: Parameters<typeof transports.request>[0] & {
+        channelName?: string;
+        channelKind?: string;
+      },
+      execute: () => Promise<T>,
+    ): Promise<T> {
+      const operation = transports.request(options);
+      operation.channel(options);
+      try {
+        const response = await operation.run(execute);
+        operation.completed(response.status);
+        return response;
+      } catch (error) {
+        operation.failed();
+        throw error;
+      }
+    },
+    async mcp<T>(
+      options: Parameters<typeof transports.mcp>[0],
+      execute: () => Promise<T>,
+    ): Promise<T> {
+      const operation = transports.mcp(options);
+      try {
+        const value = await operation.run(execute);
+        operation.completed(value);
+        return value;
+      } catch (error) {
+        operation.failed(error);
+        throw error;
+      }
+    },
     async turn<T>(turn: TurnInput, execute: (scope: TurnScope) => Promise<T>): Promise<T> {
       const links: TraceLink[] = [];
       if (turn.sequence === 0 && turn.caller !== undefined)
@@ -42,7 +85,11 @@ export function createAgentTracing(input: {
       if (turn.request !== undefined)
         links.push({ context: turn.request, relationship: "channel.request" });
       const scope = await runtime.turn(
-        { ...turn, agentName: input.agentName, framework: input.framework },
+        {
+          ...turn,
+          agentName: input.agentName,
+          framework: input.framework ?? { name: "custom", version: "" },
+        },
         {
           ...turn.activation,
           sequence: turn.sequence,
@@ -71,3 +118,5 @@ export function createAgentTracing(input: {
     },
   };
 }
+
+export type AgentTracing = ReturnType<typeof createAgentTracing>;

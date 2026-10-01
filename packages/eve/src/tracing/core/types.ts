@@ -73,6 +73,7 @@ export interface TraceBackend {
 }
 
 export interface DurableTraceBackend extends TraceBackend {
+  admits(span: PreparedSpan, reference: TraceReference): boolean;
   reserveActivation(input: {
     key: string;
     span: PreparedSpan;

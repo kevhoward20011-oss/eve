@@ -9,14 +9,15 @@ import {
   SPAN_NAMES,
 } from "#tracing/core/contract.js";
 import type {
-  Attributes,
   CaptureDecision,
   ExecutionContext,
   TraceBackend,
   TraceReference,
 } from "#tracing/core/types.js";
+import { mcpLifecycle } from "#tracing/core/mcp.js";
+import type { ContentSerializer } from "#tracing/core/model.js";
 
-export function createTransportLifecycle(backend: TraceBackend) {
+export function createTransportLifecycle(backend: TraceBackend, serializer: ContentSerializer) {
   const engine = createTraceEngine({ backend });
   return {
     request(input: {
@@ -64,20 +65,39 @@ export function createTransportLifecycle(backend: TraceBackend) {
       parent?: TraceReference;
       executionContext?: ExecutionContext;
       capture: CaptureDecision;
-      attributes?: Attributes;
     }) {
-      return engine.start(
+      const operation = engine.start(
         {
           type: "mcp",
           operationId: `${input.connectionName}:${input.method}`,
           name: mcpName(input.method, input.toolName),
           kind: "CLIENT",
           parent: input.parent,
-          attributes: { ...input.attributes, ...mcpAttributes(input) },
+          attributes: mcpAttributes(input),
         },
         input.capture,
         input.executionContext,
       );
+      const semantic = mcpLifecycle({
+        serializer,
+        ...input.capture,
+        write: (attributes) => applyAttributes(operation, attributes),
+        error: operation.fail,
+      });
+      return {
+        reference: operation.reference,
+        run: operation.run,
+        ...semantic,
+        completed(result?: unknown) {
+          if (result !== undefined) semantic.result(result);
+          operation.end();
+        },
+        failed(error?: unknown, type?: string) {
+          semantic.error(error, type);
+          operation.end();
+        },
+        end: operation.end,
+      };
     },
   };
 }

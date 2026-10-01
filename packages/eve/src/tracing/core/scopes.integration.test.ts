@@ -23,10 +23,12 @@ describe("constructed agent trace scopes", () => {
     });
     try {
       const tracing = createAgentTracing({
-        backend: liveOtelBackend(provider.getTracer("dsl")),
+        adapter: {
+          backend: liveOtelBackend(provider.getTracer("dsl")),
+          serializer: aiSdkContentSerializer,
+        },
         agentName: "support",
         framework: { name: "custom", version: "1" },
-        serializer: aiSdkContentSerializer,
       });
       const value = await tracing.turn(
         { conversationId: "conversation", runId: "run", turnId: "turn", sequence: 0 },
@@ -78,10 +80,12 @@ describe("constructed agent trace scopes", () => {
     });
     try {
       const tracing = createAgentTracing({
-        backend: liveOtelBackend(provider.getTracer("lifecycle")),
+        adapter: {
+          backend: liveOtelBackend(provider.getTracer("lifecycle")),
+          serializer: aiSdkContentSerializer,
+        },
         agentName: "support",
         framework: { name: "custom", version: "1" },
-        serializer: aiSdkContentSerializer,
       });
       const turn = await tracing.lifecycle.turn(
         {

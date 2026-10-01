@@ -98,6 +98,12 @@ export function durableOtelBackend(input: {
   const live = liveOtelBackend(input.tracer, input.mapping);
   return {
     ...live,
+    admits(span, reference) {
+      return input.samplesTrace(reference.traceId, {
+        name: input.mapping?.name?.(span, span.name) ?? span.name,
+        attributes: mappedAttributes(input.mapping, span, span.attributes),
+      });
+    },
     reserveActivation({ key, span, capture }) {
       const traceId = input.idGenerator.deriveTraceId(key);
       return {

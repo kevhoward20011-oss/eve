@@ -1,5 +1,11 @@
 import type { ExecutionContext, TraceReference, TraceLink, Usage } from "#tracing/core/types.js";
-import type { ModelResult } from "#tracing/core/scopes.js";
+import type { ModelResult, ScopeRecord } from "#tracing/core/scopes.js";
+
+export interface TraceCheckpointer {
+  load(key: string): Promise<ScopeRecord | undefined>;
+  save(record: ScopeRecord): Promise<void>;
+  remove(key: string): Promise<void>;
+}
 
 export interface ScopeCost {
   readonly cost?: number;

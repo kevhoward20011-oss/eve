@@ -22,8 +22,11 @@ import { liveOtelBackend, aiSdkContentSerializer } from "#tracing/adapters/index
 const tracing = createAgentTracing({
   agentName: "support",
   framework: { name: "custom-agent", version: "1.0" },
-  backend: liveOtelBackend(tracer),
-  serializer: aiSdkContentSerializer,
+  adapter: {
+    backend: liveOtelBackend(tracer),
+    serializer: aiSdkContentSerializer,
+    integrations: { aiSdk: aiSdkTracing },
+  },
 });
 
 await tracing.turn({ conversationId, runId, turnId, sequence: 0 }, async (turn) => {
@@ -41,6 +44,9 @@ A turn can construct steps. A step can construct models and actions. An action
 can construct tools and approvals. Each constructor controls its child's parent
 and lifetime. Memory operations can run in turn, step, and action scopes.
 No authoring scope exposes a span, attribute map, checkpoint, or resume method.
+`createAgentTracing` is the only construction entry point. Supply backend,
+serializer, and SDK integrations through its `adapter` option. The library index
+does not export span builders, attribute helpers, or raw emission operations.
 
 `modelResult` converts the application's model result into semantic usage,
 response identity, finish reason, and permitted response parts. The callback's
@@ -53,12 +59,17 @@ same conversation identity.
 
 ## SDK hooks
 
-Use `aiSdkTracing(turn)` for SDK-owned execution. Its hooks construct the same
+Configure the SDK adapter in `createAgentTracing`. Its hooks construct the same
 scopes internally. Application code needs only the turn callback:
 
 ```ts
 await tracing.turn({ conversationId, runId, turnId, sequence: 0 }, async (turn) => {
-  return await generateText({ model, messages, tools, telemetry: aiSdkTracing(turn) });
+  return await generateText({
+    model,
+    messages,
+    tools,
+    telemetry: tracing.integrations.aiSdk(turn),
+  });
 });
 ```
 
@@ -93,7 +104,7 @@ checkpoint record from an external runtime. Record conversion belongs in the
 checkpointer adapter. Construct ordinary children directly from the resolved
 parent; the lifecycle inherits attempt and output context automatically.
 
-Transport adapters use `createTransportLifecycle().request()` or `.mcp()`.
+Transport adapters use `tracing.lifecycle.request()` or `.mcp()`.
 They supply protocol data, not span names or OTel options. The backend remains
 the only component that starts OTel spans.
 
@@ -105,7 +116,8 @@ mapping before destination filtering. A profile cannot restore denied content.
 
 Request and MCP transport tracing are separate entry points. Pass route templates,
 not user-supplied URLs. Enrich the active tool scope instead of creating a second
-MCP call span when the tool already owns execution.
+MCP call span when the tool already owns execution. Enrichment uses `scope.mcp`
+methods for protocol metadata, arguments, results, and errors, never attribute maps.
 
 Agent Runs export, remote protocol authorization, and global registration remain
 outside scope construction.

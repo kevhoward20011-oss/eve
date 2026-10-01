@@ -42,6 +42,7 @@ import {
   capturedScopeData as capturedData,
 } from "#tracing/core/scope-completion.js";
 import { topologyScope } from "#tracing/core/topology.js";
+import { mcpLifecycle, type McpLifecycle } from "#tracing/core/mcp.js";
 export { scopeRuntime } from "#tracing/core/topology.js";
 
 export interface ScopeIdentity extends RunIdentity {
@@ -168,11 +169,8 @@ export interface ScopeRecord {
   readonly content?: { readonly recordInputs: boolean; readonly recordOutputs: boolean };
 }
 
-export interface TraceCheckpointer {
-  load(key: string): Promise<ScopeRecord | undefined>;
-  save(record: ScopeRecord): Promise<void>;
-  remove(key: string): Promise<void>;
-}
+export type { TraceCheckpointer } from "#tracing/core/scope-lifecycle.js";
+import type { TraceCheckpointer } from "#tracing/core/scope-lifecycle.js";
 
 export type { RuntimeBinding, ScopeTerminal } from "#tracing/core/scope-lifecycle.js";
 import type { RuntimeBinding, ScopeTerminal } from "#tracing/core/scope-lifecycle.js";
@@ -200,7 +198,7 @@ export interface RuntimeScope {
   modelSelected(modelId: string, provider: string): void;
   error(error?: unknown, errorType?: string): void;
   cost(cost: ScopeCost): void;
-  annotate(attributes: Attributes): void;
+  readonly mcp: McpLifecycle;
 }
 
 export function createTraceLifecycle(input: {
@@ -314,6 +312,7 @@ export function createTraceLifecycle(input: {
     let stepIndex = saved?.stepIndex ?? 0;
     let childIndex = saved?.childIndex ?? 0;
     let pendingError: { error?: unknown; errorType?: string } | undefined;
+    const enrichment: Record<string, Attributes[string]> = {};
     let authoring: TurnScope | StepScope | ActionScope;
     function requireParent(types: readonly ScopeData["type"][]): void {
       if (finished || !types.includes(actualData.type))
@@ -353,6 +352,17 @@ export function createTraceLifecycle(input: {
         return authoring;
       },
       capture: actualCapture,
+      mcp: mcpLifecycle({
+        serializer: input.serializer,
+        ...actualCapture,
+        write(attributes) {
+          Object.assign(enrichment, attributes);
+          if (operation !== undefined) applyAttributes(operation, attributes);
+        },
+        error(error, type) {
+          runtime.error(error, type);
+        },
+      }),
       get finished() {
         return finished;
       },
@@ -447,6 +457,7 @@ export function createTraceLifecycle(input: {
           input.serializer,
         );
         if (pendingError !== undefined) operation.fail(pendingError.error, pendingError.errorType);
+        applyAttributes(operation, enrichment);
         if (actualData.type === "model" && result.model !== undefined)
           await parent?.usage(result.model.usage);
         operation.end(result.endTimeMs);
@@ -491,9 +502,6 @@ export function createTraceLifecycle(input: {
       },
       cost(cost) {
         if (operation !== undefined) applyAttributes(operation, gatewayCostAttributes(cost));
-      },
-      annotate(attributes) {
-        if (operation !== undefined) applyAttributes(operation, attributes);
       },
       error(error, errorType) {
         pendingError = { error: actualCapture.recordOutputs ? error : undefined, errorType };
@@ -639,6 +647,21 @@ export function createTraceLifecycle(input: {
   }
 
   return {
+    sample(record: ScopeRecord): boolean {
+      const backend = input.backend as Partial<DurableTraceBackend>;
+      if (backend.admits === undefined) return (record.reference.traceFlags & 1) !== 0;
+      const span = prepare(
+        record.identity,
+        record.data,
+        record.attempt,
+        record.capture,
+        record.key,
+        record.parent,
+        record.startTimeMs,
+        record.links,
+      );
+      return backend.admits({ ...span, outputContext: record.outputContext }, record.reference);
+    },
     resolve(
       record: ScopeRecord,
       options: {

@@ -16,7 +16,6 @@ import { eveOutputMapping } from "#tracing/adapters/eve/compatibility.js";
 import { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { createTraceEngine } from "#tracing/core/engine.js";
 import { createDurableTraceDriver, type DurableSpanRecord } from "#tracing/core/durable.js";
-import { createTransportTracing } from "#tracing/adapters/transports.js";
 import { ROOT_CONTEXT, createContextKey } from "@opentelemetry/api";
 
 const usage = {
@@ -49,8 +48,7 @@ function setup(mapping = false) {
   const tracing = createAgentTracing({
     agentName: "support",
     framework: { name: "custom", version: "1" },
-    backend,
-    serializer: aiSdkContentSerializer,
+    adapter: { backend, serializer: aiSdkContentSerializer, integrations: { aiSdk: aiSdkTracing } },
   });
   return { exporter, provider, tracer, backend, tracing, idGenerator };
 }
@@ -141,7 +139,7 @@ describe("standalone agent tracing", () => {
                 },
               }),
             },
-            telemetry: aiSdkTracing(turn),
+            telemetry: runtime.tracing.integrations.aiSdk(turn),
           });
         },
       );
@@ -259,8 +257,11 @@ describe("standalone agent tracing", () => {
     const tracing = createAgentTracing({
       agentName: "support",
       framework: { name: "custom", version: "1" },
-      backend: runtime.backend,
-      serializer: aiSdkContentSerializer,
+      adapter: {
+        backend: runtime.backend,
+        serializer: aiSdkContentSerializer,
+        integrations: { aiSdk: aiSdkTracing },
+      },
       content: { recordInputs: true, recordOutputs: true },
     });
     let attempts = 0;
@@ -289,7 +290,7 @@ describe("standalone agent tracing", () => {
           model,
           prompt: "Alice's question",
           maxRetries: 1,
-          telemetry: aiSdkTracing(turn),
+          telemetry: tracing.integrations.aiSdk(turn),
         }),
     );
     await vi.runAllTimersAsync();
@@ -352,8 +353,7 @@ describe("standalone agent tracing", () => {
     const tracing = createAgentTracing({
       agentName: "support",
       framework: { name: "custom", version: "1" },
-      backend: runtime.backend,
-      serializer: aiSdkContentSerializer,
+      adapter: { backend: runtime.backend, serializer: aiSdkContentSerializer },
       content: { recordInputs: true, recordOutputs: false },
     });
     await tracing.turn(
@@ -378,7 +378,7 @@ describe("standalone agent tracing", () => {
         );
       },
     );
-    const transport = createTransportTracing(runtime.backend);
+    const transport = runtime.tracing;
     await transport.request(
       { method: "POST", route: "/agents/:id", channelName: "http", channelKind: "http" },
       async () => ({ status: 503 }),
@@ -464,7 +464,11 @@ describe("standalone agent tracing", () => {
     await runtime.tracing.turn(
       { conversationId: "conversation", runId: "run", turnId: "stream", sequence: 0 },
       async (turn) => {
-        const response = streamText({ model, prompt: "Help Alice", telemetry: aiSdkTracing(turn) });
+        const response = streamText({
+          model,
+          prompt: "Help Alice",
+          telemetry: runtime.tracing.integrations.aiSdk(turn),
+        });
         for await (const chunk of response.textStream) {
           text += chunk;
           expect(
