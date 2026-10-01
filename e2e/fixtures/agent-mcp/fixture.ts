@@ -1,0 +1,55 @@
+/**
+ * Identities and credentials shared by the agent and its evals. Everything
+ * here is fixture-only: the deployment is a protected preview, and these
+ * values exist so the fixture can call itself without injected env.
+ */
+
+/** Header naming the person behind an eve-channel or direct MCP request. */
+export const USER_HEADER = "x-eve-fixture-user";
+
+/** The service principal the loopback connection authenticates as. */
+export const FORWARDER_ID = "maple-router";
+
+/** Bearer token the loopback connection presents to the MCP channel. Fixture-only. */
+export const FORWARDER_TOKEN = "agent-mcp-fixture-forwarder-token";
+
+/**
+ * HMAC key for MCP `requestState`. Fixture-only: passing it to `mcpChannel`
+ * makes approval rounds verify on every instance, locally and on Vercel,
+ * without `EVE_MCP_REQUEST_STATE_SECRET`. At least 32 bytes.
+ */
+export const REQUEST_STATE_SECRET = "agent-mcp-fixture-request-state-secret-0123456789";
+
+/** The connection the agent uses to reach its own MCP channel. */
+export const LOOPBACK_CONNECTION = "loopback";
+
+export const MCP_PATH = "/eve/v1/mcp";
+
+/** Where `write_note` and `read_note` keep the tool session's note. */
+export const NOTE_PATH = "/workspace/front-desk-note.txt";
+
+export function fixturePrincipal(principalId: string, principalType: "service" | "user") {
+  return {
+    attributes: {},
+    authenticator: "e2e-fixture",
+    issuer: "e2e",
+    principalId,
+    principalType,
+    subject: principalId,
+  };
+}
+
+/** This deployment's MCP channel, the way `kennelUrl()` reaches its own kennel. */
+export function selfMcpUrl(): string {
+  const deploymentHost = process.env.VERCEL_URL;
+  const host = deploymentHost
+    ? `https://${deploymentHost}`
+    : (process.env.WORKFLOW_LOCAL_BASE_URL ?? "http://127.0.0.1:3000");
+  return `${host}${process.env.EVE_PUBLIC_ROUTE_PREFIX ?? ""}${MCP_PATH}`;
+}
+
+/** Lets self-calls reach a protected preview deployment of this fixture. */
+export function previewBypassHeaders(): Record<string, string> {
+  const bypass = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  return bypass ? { "x-vercel-protection-bypass": bypass } : {};
+}
