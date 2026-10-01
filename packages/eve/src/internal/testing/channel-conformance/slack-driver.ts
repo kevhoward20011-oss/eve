@@ -2,10 +2,11 @@ import { createHmac } from "node:crypto";
 
 import { slackChannel } from "#public/channels/slack/index.js";
 import { HITL_ACTION_PREFIX } from "#public/channels/slack/hitl.js";
-import type {
-  ChannelDriver,
-  PlatformCall,
-  RenderedOption,
+import {
+  type ChannelDriver,
+  type PlatformCall,
+  type RenderedOption,
+  recordingFetch,
 } from "#internal/testing/channel-conformance/harness.js";
 import { decodeSlackApiBody } from "#internal/testing/slack-api-body.js";
 
@@ -67,33 +68,34 @@ export function slackDriver(): ChannelDriver {
     });
   }
 
+  async function decode(request: Request): Promise<PlatformCall> {
+    const method = new URL(request.url).pathname.split("/").at(-1)!;
+    const body = decodeSlackApiBody(await request.text(), request.headers.get("content-type"));
+    const ts = nextTs();
+    return {
+      body,
+      method,
+      response: {
+        bot_id: "B_EVE",
+        channel: CHANNEL,
+        message: { ts },
+        messages: [],
+        ok: true,
+        team_id: TEAM,
+        ts,
+        user_id: "U_EVE",
+      },
+    };
+  }
+
   return {
     name: "slack",
     capabilities: ["buttons", "text-replies"],
-    createChannel: (fetch) =>
+    createChannel: (record) =>
       slackChannel({
-        api: { fetch },
+        api: { fetch: recordingFetch(record, decode) },
         credentials: { botToken: "xoxb-conformance", signingSecret: SIGNING_SECRET },
       }),
-    async record(request) {
-      const method = new URL(request.url).pathname.split("/").at(-1)!;
-      const body = decodeSlackApiBody(await request.text(), request.headers.get("content-type"));
-      const ts = nextTs();
-      return {
-        body,
-        method,
-        response: {
-          bot_id: "B_EVE",
-          channel: CHANNEL,
-          message: { ts },
-          messages: [],
-          ok: true,
-          team_id: TEAM,
-          ts,
-          user_id: "U_EVE",
-        },
-      };
-    },
     message: (text) => {
       const ts = threadStarted ? nextTs() : threadTs;
       const thread = threadStarted ? { thread_ts: threadTs } : {};

@@ -42,10 +42,11 @@ export type ChannelCapability =
 export interface ChannelDriver {
   readonly name: string;
   readonly capabilities: readonly ChannelCapability[];
-  /** Builds the channel with its platform API pointed at `fetch`. */
-  createChannel(fetch: typeof globalThis.fetch): unknown;
-  /** Decodes one outbound API request and answers it as the platform would. */
-  record(request: Request): Promise<PlatformCall>;
+  /**
+   * Builds the channel against a fake platform that reports each outbound call
+   * to `record`. HTTP platforms use {@link recordingFetch}.
+   */
+  createChannel(record: (call: PlatformCall) => void): unknown;
   /** A webhook request carrying a person's message. */
   message(text: string): Request;
   /** Options rendered in one outbound call for a question, or `undefined` when it isn't one. */
@@ -70,6 +71,18 @@ export interface ChannelConversation {
 
 const WAIT_TIMEOUT_MS = 15_000;
 
+/** A `fetch` for an HTTP platform API: `decode` turns each request into a call and its answer. */
+export function recordingFetch(
+  record: (call: PlatformCall) => void,
+  decode: (request: Request) => Promise<PlatformCall>,
+): typeof globalThis.fetch {
+  return async (input, init) => {
+    const call = await decode(new Request(input, init));
+    record(call);
+    return Response.json(call.response);
+  };
+}
+
 /**
  * Runs `body` against an agent with `ask_question` and `driver`'s channel. Every
  * interaction goes through the channel's real webhook routes; the only fake is
@@ -80,12 +93,7 @@ export async function withChannelConversation(
   body: (conversation: ChannelConversation) => Promise<void>,
 ): Promise<void> {
   const calls: PlatformCall[] = [];
-  const fetch: typeof globalThis.fetch = async (input, init) => {
-    const call = await driver.record(new Request(input, init));
-    calls.push(call);
-    return Response.json(call.response);
-  };
-  const created = driver.createChannel(fetch);
+  const created = driver.createChannel((call) => void calls.push(call));
   if (!isCompiledChannel(created)) throw new Error(`${driver.name} is not a compiled channel.`);
   const channel: CompiledChannel = created;
 

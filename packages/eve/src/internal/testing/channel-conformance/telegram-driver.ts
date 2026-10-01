@@ -1,5 +1,9 @@
 import { telegramChannel } from "#public/channels/telegram/index.js";
-import type { ChannelDriver, PlatformCall } from "#internal/testing/channel-conformance/harness.js";
+import {
+  type ChannelDriver,
+  type PlatformCall,
+  recordingFetch,
+} from "#internal/testing/channel-conformance/harness.js";
 
 const SECRET = "telegram-conformance-secret";
 let nextChatId = 1000;
@@ -30,24 +34,25 @@ export function telegramDriver(): ChannelDriver {
     });
   }
 
+  async function decode(request: Request): Promise<PlatformCall> {
+    const method = new URL(request.url).pathname.split("/").at(-1)!;
+    const text = await request.text();
+    messageId += 1;
+    return {
+      body: text === "" ? {} : JSON.parse(text),
+      method,
+      response: { ok: true, result: { chat: CHAT, date: 0, message_id: messageId } },
+    };
+  }
+
   return {
     name: "telegram",
     capabilities: ["buttons", "text-replies"],
-    createChannel: (fetch) =>
+    createChannel: (record) =>
       telegramChannel({
-        api: { fetch },
+        api: { fetch: recordingFetch(record, decode) },
         credentials: { botToken: "bot-token", webhookSecretToken: SECRET },
       }),
-    async record(request) {
-      const method = new URL(request.url).pathname.split("/").at(-1)!;
-      const text = await request.text();
-      messageId += 1;
-      return {
-        body: text === "" ? {} : JSON.parse(text),
-        method,
-        response: { ok: true, result: { chat: CHAT, date: 0, message_id: messageId } },
-      };
-    },
     message: (text) =>
       update({ message: { chat: CHAT, date: 0, from: PERSON, message_id: 1000 + updateId, text } }),
     findOptions(call, prompt) {

@@ -5,6 +5,7 @@ import {
   type ChannelDriver,
   withChannelConversation,
 } from "#internal/testing/channel-conformance/harness.js";
+import { chatSdkDriver } from "#internal/testing/channel-conformance/chat-sdk-driver.js";
 import { slackDriver } from "#internal/testing/channel-conformance/slack-driver.js";
 import { telegramDriver } from "#internal/testing/channel-conformance/telegram-driver.js";
 
@@ -13,43 +14,44 @@ import { telegramDriver } from "#internal/testing/channel-conformance/telegram-d
  *
  * - must pass;
  * - not supported: the platform lacks a capability the rule requires (skipped);
- * - known gap: the channel should pass but doesn't yet. It runs as `it.fails`,
- *   so fixing the gap turns the cell red until its entry is deleted.
+ * - broken: the channel should pass but doesn't yet. It runs as `it.fails`,
+ *   so fixing it turns the cell red until its `broken` entry is deleted.
  */
 const channels: readonly {
   readonly driver: () => ChannelDriver;
-  readonly knownGaps?: Partial<Record<HitlRule, string>>;
+  readonly broken?: Partial<Record<HitlRule, string>>;
 }[] = [
+  { driver: chatSdkDriver },
   {
     driver: slackDriver,
-    knownGaps: {
+    broken: {
       "a text reply matching an option answers the only pending question":
         "the answer is the whole <slack_message> envelope",
     },
   },
   {
     driver: telegramDriver,
-    knownGaps: {
+    broken: {
       "pressing a rendered option answers the pending question with that option": "#4105",
       "a text reply matching an option answers the only pending question":
-        "the reply starts a new turn instead",
+        "the leftover channel context interrupts the turn and withdraws the question",
     },
   },
 ];
 
 describe.each(channels.map((entry) => ({ ...entry, name: entry.driver().name })))(
   "$name HITL contract",
-  ({ driver, knownGaps }) => {
+  ({ driver, broken }) => {
     for (const rule of hitlContract) {
       const { capabilities } = driver();
       const supported = rule.requires.every((capability) => capabilities.includes(capability));
-      const gap = knownGaps?.[rule.rule];
-      const test = !supported ? it.skip : gap === undefined ? it : it.fails;
+      const reason = broken?.[rule.rule];
+      const test = !supported ? it.skip : reason === undefined ? it : it.fails;
       const name = !supported
         ? `${rule.rule} (not supported)`
-        : gap === undefined
+        : reason === undefined
           ? rule.rule
-          : `${rule.rule} (known gap: ${gap})`;
+          : `${rule.rule} (broken: ${reason})`;
       test(name, () => withChannelConversation(driver(), (c) => rule.run(c)), 60_000);
     }
   },
