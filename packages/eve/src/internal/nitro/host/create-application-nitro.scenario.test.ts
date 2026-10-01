@@ -69,7 +69,13 @@ interface NitroStub {
   readonly nitro: Nitro;
 }
 
-function createNitroStub(input: { buildDir?: string; dev?: boolean } = {}): NitroStub {
+function createNitroStub(
+  input: {
+    buildDir?: string;
+    dev?: boolean;
+    serverAssets?: { baseName: string; dir: string }[];
+  } = {},
+): NitroStub {
   const hookHandlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
 
   return {
@@ -89,7 +95,7 @@ function createNitroStub(input: { buildDir?: string; dev?: boolean } = {}): Nitr
         handlers: [],
         publicAssets: [],
         rootDir: "/tmp/weather-agent",
-        serverAssets: [],
+        serverAssets: input.serverAssets ?? [],
         virtual: {},
       },
       routing: {
@@ -493,6 +499,35 @@ describe("application Nitro creation", () => {
       maxDuration: "max",
       experimentalTriggers: [expect.objectContaining({ type: "queue/v2beta" })],
     });
+  });
+
+  it("registers skill files as Nitro server assets and drops Nitro's default server base", async () => {
+    // Nitro resolves `serverAssets` and appends `server` for `<rootDir>/assets`.
+    const nitroStub = createNitroStub({
+      serverAssets: [
+        { baseName: "eve-skill-index", dir: "/index" },
+        { baseName: "server", dir: "/tmp/weather-agent/assets" },
+      ],
+    });
+    createNitroMock.mockResolvedValueOnce(nitroStub.nitro);
+
+    const { createProductionApplicationNitro } =
+      await import("#internal/nitro/host/create-application-nitro.js");
+    const preparedHost = await createPreparedHost();
+    const options = createProductionOptions(preparedHost);
+    await createProductionApplicationNitro(preparedHost, options);
+
+    const stagingDirectory = join(options.buildDir, "eve-skill-assets");
+    expect(createNitroMock.mock.calls[0]?.[0].serverAssets).toEqual([
+      { baseName: "eve-skill-index", dir: join(stagingDirectory, "index") },
+      { baseName: "eve-skills", dir: join(stagingDirectory, "files") },
+    ]);
+    expect(
+      JSON.parse(await readFile(join(stagingDirectory, "index", "skills.json"), "utf8")),
+    ).toEqual({ version: 1, skills: [] });
+    expect(nitroStub.nitro.options.serverAssets).toEqual([
+      { baseName: "eve-skill-index", dir: "/index" },
+    ]);
   });
 
   it("enables websockets without overriding the Vercel entry format", async () => {

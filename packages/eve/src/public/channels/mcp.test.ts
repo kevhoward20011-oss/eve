@@ -559,3 +559,959 @@ async function jsonRpcResponse(response: Response): Promise<unknown> {
   if (data === undefined) throw new Error("MCP SSE response did not contain a data event.");
   return JSON.parse(data.slice("data: ".length));
 }
+
+const SECRET = "x".repeat(32);
+const CAPS_ALL = {
+  elicitation: { form: {}, url: {} },
+  extensions: { "dev.eve/tool-sessions": {} },
+};
+
+const toolsDescription: AgentDescription = {
+  name: "compiled-agent",
+  skills: [],
+  tools: [
+    {
+      approval: true,
+      description: "Deploys.",
+      inputSchema: { properties: { env: { type: "string" } }, type: "object" },
+      invocable: true,
+      name: "deploy",
+    },
+    {
+      approval: false,
+      description: "Runs only in a turn.",
+      inputSchema: { type: "object" },
+      invocable: false,
+      name: "harness_only",
+    },
+    {
+      approval: false,
+      description: "Reads issues.",
+      inputSchema: { type: "object" },
+      invocable: true,
+      name: "issues",
+    },
+    {
+      approval: false,
+      description: "Echoes.",
+      inputSchema: {
+        additionalProperties: false,
+        properties: { x: { type: "number" } },
+        type: "object",
+      },
+      invocable: true,
+      name: "plain",
+      outputSchema: { properties: { x: { type: "number" } }, type: "object" },
+    },
+  ],
+};
+
+interface ModernCall {
+  readonly capabilities?: Readonly<Record<string, unknown>>;
+  readonly headers?: Record<string, string>;
+  readonly meta?: Readonly<Record<string, unknown>>;
+}
+
+function modernRequest(
+  method: string,
+  params: Readonly<Record<string, unknown>> = {},
+  call: ModernCall = {},
+): Request {
+  const headers: Record<string, string> = {
+    "mcp-method": method,
+    "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+    ...call.headers,
+  };
+  if (typeof params.name === "string") headers["mcp-name"] = params.name;
+  return mcpRequest(
+    {
+      id: 1,
+      jsonrpc: "2.0",
+      method,
+      params: {
+        ...params,
+        _meta: {
+          ...call.meta,
+          "io.modelcontextprotocol/clientCapabilities": call.capabilities ?? CAPS_ALL,
+          "io.modelcontextprotocol/clientInfo": { name: "test-client", version: "0.0.0" },
+          "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+        },
+      },
+    },
+    headers,
+  );
+}
+
+type JsonRpc = {
+  readonly error?: { readonly code: number; readonly data?: unknown; readonly message: string };
+  readonly result?: Record<string, any>;
+};
+
+function postHandler(channel: ReturnType<typeof mcpChannel>) {
+  const route = channel.routes.find((entry) => entry.method === "POST")!;
+  if (route.transport === "websocket") throw new Error("expected HTTP route");
+  return route.handler;
+}
+
+async function rpc(
+  channel: ReturnType<typeof mcpChannel>,
+  request: Request,
+  args: RouteHandlerArgs,
+): Promise<JsonRpc> {
+  return (await jsonRpcResponse(await postHandler(channel)(request, args))) as JsonRpc;
+}
+
+/** A core stand-in: `deploy` needs approval, `issues` needs a sign-in until `signedIn`. */
+function fakeCore(state: { signedIn?: boolean; challengeUrl?: string | null } = {}) {
+  return vi.fn<InvokeToolFn>(async (name, input, options) => {
+    const callId = options.callId ?? "call_new";
+    const nonce = options.key === undefined ? (options.oneOffNonce ?? "nonce-1") : undefined;
+    const pause = nonce === undefined ? {} : { oneOffNonce: nonce };
+    if (name === "plain") {
+      return {
+        modelOutput: { type: "json", value: input },
+        output: input,
+        sandbox: { ms: 12, state: "created" },
+        status: "completed",
+      };
+    }
+    if (name === "deploy") {
+      if (options.approval === undefined) return { callId, status: "approval-required", ...pause };
+      if (!options.approval.approved) return { reason: "The person declined.", status: "denied" };
+      if (state.signedIn === false) {
+        return {
+          callId,
+          challenges: [{ challenge: { url: "https://idp.example/a" }, name: "linear" }],
+          status: "authorization-required",
+          ...pause,
+        };
+      }
+      return {
+        modelOutput: { type: "text", value: "deployed" },
+        output: "deployed",
+        status: "completed",
+      };
+    }
+    if (name === "issues") {
+      if (state.signedIn !== true) {
+        return {
+          callId,
+          challenges: [
+            {
+              challenge:
+                state.challengeUrl === null
+                  ? { message: "Approve on your phone." }
+                  : { url: state.challengeUrl ?? "https://idp.example/a", userCode: "ABCD" },
+              name: "linear",
+            },
+          ],
+          status: "authorization-required",
+          ...pause,
+        };
+      }
+      return {
+        modelOutput: { type: "text", value: "3 issues" },
+        output: { count: 3 },
+        status: "completed",
+      };
+    }
+    return {
+      errorId: "err_1",
+      message: `The agent has no tool named "${name}".`,
+      status: "failed",
+    };
+  });
+}
+
+function decodeState(state: unknown): Record<string, any> {
+  if (typeof state !== "string") throw new Error("requestState was not a string.");
+  return JSON.parse(Buffer.from(state.split(".")[1]!, "base64url").toString("utf8")).p;
+}
+
+function toolsChannel(input: Partial<Parameters<typeof mcpChannel>[0]> = {}) {
+  return mcpChannel({
+    auth: (request) => ({
+      attributes: {},
+      authenticator: "test",
+      principalId: request.headers.get("x-test-principal") ?? "user-1",
+      principalType: "user",
+    }),
+    requestStateSecret: SECRET,
+    ...input,
+  });
+}
+
+describe("mcpChannel tools", () => {
+  it("lists invocable tools in order with schemas as compiled, approval meta, and cache hints", async () => {
+    const channel = toolsChannel();
+    const args = routeArgs({ description: toolsDescription });
+    const listed = await rpc(channel, modernRequest("tools/list"), args);
+
+    expect(listed.result).toEqual({
+      cacheScope: "private",
+      resultType: "complete",
+      tools: [
+        {
+          _meta: { "dev.eve/approval": true },
+          description: "Deploys.",
+          inputSchema: toolsDescription.tools[0]!.inputSchema,
+          name: "deploy",
+        },
+        { description: "Reads issues.", inputSchema: { type: "object" }, name: "issues" },
+        {
+          description: "Echoes.",
+          inputSchema: toolsDescription.tools[3]!.inputSchema,
+          name: "plain",
+          outputSchema: toolsDescription.tools[3]!.outputSchema,
+        },
+      ],
+      ttlMs: 300_000,
+      _meta: expect.anything(),
+    });
+
+    const discovered = await rpc(channel, modernRequest("server/discover"), args);
+    expect(discovered.result).toMatchObject({ cacheScope: "private", ttlMs: 300_000 });
+  });
+
+  it("keeps the 2025-11-25 fallback listing the same tools", async () => {
+    const listed = await rpc(
+      toolsChannel(),
+      mcpRequest({ id: 1, jsonrpc: "2.0", method: "tools/list" }),
+      routeArgs({ description: toolsDescription }),
+    );
+    expect(listed.result?.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      "deploy",
+      "issues",
+      "plain",
+    ]);
+  });
+
+  it("tools: false removes the capability, the extension, the list, and calls", async () => {
+    const invokeTool = fakeCore();
+    const channel = toolsChannel({ tools: false });
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+
+    const discovered = await rpc(channel, modernRequest("server/discover"), args);
+    expect(discovered.result?.capabilities.tools).toBeUndefined();
+    expect(discovered.result?.capabilities.extensions?.["dev.eve/tool-sessions"]).toBeUndefined();
+
+    const listed = await rpc(channel, modernRequest("tools/list"), args);
+    expect(listed.error?.code).toBe(-32_601);
+    const called = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: { x: 1 }, name: "plain" }),
+      args,
+    );
+    expect(called.error?.code).toBe(-32_601);
+    expect(invokeTool).not.toHaveBeenCalled();
+  });
+
+  it("maps a completed call: content, structuredContent, sandbox meta, and the call options", async () => {
+    const invokeTool = fakeCore();
+    const called = await rpc(
+      toolsChannel(),
+      modernRequest(
+        "tools/call",
+        { arguments: { x: 1 }, name: "plain" },
+        { meta: { "dev.eve/tool-session": "thread-1" } },
+      ),
+      routeArgs({ description: toolsDescription, invokeTool }),
+    );
+
+    expect(called.result).toMatchObject({
+      _meta: { "dev.eve/sandbox": { ms: 12, state: "created" } },
+      content: [{ text: '{"x":1}', type: "text" }],
+      structuredContent: { x: 1 },
+    });
+    expect(called.result?.isError).toBeUndefined();
+    const [, input, options] = invokeTool.mock.calls[0]!;
+    expect(input).toEqual({ x: 1 });
+    expect(options.auth.principalId).toBe("user-1");
+    expect(options.key).toBe("thread-1");
+    expect(options.forwarder).toBeUndefined();
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(options.callId).toBeUndefined();
+  });
+
+  it("maps failed, invalid-input, and denied to isError results, keeping sandbox meta", async () => {
+    const results = [
+      [
+        { errorId: "err_9", message: "Boom.", status: "failed" },
+        "internal",
+        "Boom. (errorId: err_9)",
+      ],
+      [
+        { message: "x must be a number.", status: "invalid-input" },
+        "invalid_input",
+        "x must be a number.",
+      ],
+      [{ reason: "Read-only.", status: "denied" }, "denied", "Read-only."],
+      [{ status: "denied" }, "denied", "The call was denied."],
+    ] as const;
+    for (const [result, code, text] of results) {
+      const called = await rpc(
+        toolsChannel(),
+        modernRequest("tools/call", { arguments: {}, name: "plain" }),
+        routeArgs({
+          description: toolsDescription,
+          invokeTool: async () => ({ ...result, sandbox: { ms: 1, state: "reused" } }),
+        }),
+      );
+      expect(called.result).toMatchObject({
+        _meta: { "dev.eve/sandbox": { ms: 1, state: "reused" } },
+        content: [{ text, type: "text" }],
+        isError: true,
+        structuredContent: { error: { code, retryable: false } },
+      });
+    }
+  });
+
+  it("never runs unknown or non-invocable tools", async () => {
+    const invokeTool = fakeCore();
+    for (const name of ["missing", "harness_only"]) {
+      const called = await rpc(
+        toolsChannel(),
+        modernRequest("tools/call", { arguments: {}, name }),
+        routeArgs({ description: toolsDescription, invokeTool }),
+      );
+      expect(called.error?.code).toBe(-32_602);
+    }
+    expect(invokeTool).not.toHaveBeenCalled();
+  });
+
+  it("refuses a non-string tool session key as invalid_input", async () => {
+    const invokeTool = fakeCore();
+    const called = await rpc(
+      toolsChannel(),
+      modernRequest(
+        "tools/call",
+        { arguments: {}, name: "plain" },
+        { meta: { "dev.eve/tool-session": 7 } },
+      ),
+      routeArgs({ description: toolsDescription, invokeTool }),
+    );
+    expect(called.result?.structuredContent.error.code).toBe("invalid_input");
+    expect(invokeTool).not.toHaveBeenCalled();
+  });
+
+  it("ignores a tool session key from a client that did not declare dev.eve/tool-sessions", async () => {
+    const invokeTool = fakeCore();
+    const channel = toolsChannel();
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+    for (const capabilities of [
+      { elicitation: { form: {}, url: {} } },
+      { elicitation: { form: {}, url: {} }, extensions: {} },
+      { elicitation: { form: {}, url: {} }, extensions: { "dev.eve/other": {} } },
+    ]) {
+      const called = await rpc(
+        channel,
+        modernRequest(
+          "tools/call",
+          { arguments: { x: 1 }, name: "plain" },
+          { capabilities, meta: { "dev.eve/tool-session": "thread-1" } },
+        ),
+        args,
+      );
+      expect(called.result?.isError).toBeUndefined();
+    }
+    // Even a malformed key is ignored, not refused: the client never opted in.
+    await rpc(
+      channel,
+      modernRequest(
+        "tools/call",
+        { arguments: { x: 1 }, name: "plain" },
+        { capabilities: { elicitation: {} }, meta: { "dev.eve/tool-session": 7 } },
+      ),
+      args,
+    );
+    expect(invokeTool).toHaveBeenCalledTimes(4);
+    for (const [, , options] of invokeTool.mock.calls) expect(options.key).toBeUndefined();
+
+    // A paused undeclared call is a one-off: the state carries a nonce, and
+    // the retry reaches the same one-off session, not the key's.
+    const undeclared = {
+      capabilities: { elicitation: { form: {} } },
+      meta: { "dev.eve/tool-session": "k1" },
+    };
+    const asked = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: { env: "prod" }, name: "deploy" }, undeclared),
+      args,
+    );
+    expect(decodeState(asked.result?.requestState).nonce).toBe("nonce-1");
+    const approved = await rpc(
+      channel,
+      modernRequest(
+        "tools/call",
+        {
+          arguments: { env: "prod" },
+          inputResponses: { "dev.eve/approval": { action: "accept", content: { approved: true } } },
+          name: "deploy",
+          requestState: asked.result?.requestState,
+        },
+        undeclared,
+      ),
+      args,
+    );
+    expect(approved.result?.content).toEqual([{ text: "deployed", type: "text" }]);
+    expect(invokeTool.mock.calls.at(-1)![2]).toMatchObject({ oneOffNonce: "nonce-1" });
+    expect(invokeTool.mock.calls.at(-1)![2].key).toBeUndefined();
+  });
+
+  it("asks for approval with a signed requestState and honors the answer on the retry", async () => {
+    const invokeTool = fakeCore();
+    const channel = toolsChannel();
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+    const first = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: { env: "prod" }, name: "deploy" }),
+      args,
+    );
+    expect(first.result).toMatchObject({
+      _meta: { "dev.eve/approval": { callId: "call_new", tool: "deploy" } },
+      inputRequests: {
+        "dev.eve/approval": {
+          method: "elicitation/create",
+          params: {
+            message: 'Allow the tool "deploy" to run?',
+            mode: "form",
+            requestedSchema: {
+              properties: { approved: { title: "Approve", type: "boolean" } },
+              required: ["approved"],
+              type: "object",
+            },
+          },
+        },
+      },
+      resultType: "input_required",
+    });
+    const requestState = first.result?.requestState as string;
+    expect(requestState.startsWith("v1.")).toBe(true);
+
+    const approved = await rpc(
+      channel,
+      modernRequest("tools/call", {
+        arguments: { env: "prod" },
+        inputResponses: { "dev.eve/approval": { action: "accept", content: { approved: true } } },
+        name: "deploy",
+        requestState,
+      }),
+      args,
+    );
+    expect(approved.result).toMatchObject({ content: [{ text: "deployed", type: "text" }] });
+    expect(invokeTool.mock.calls[1]![2]).toMatchObject({
+      approval: { approved: true },
+      callId: "call_new",
+      oneOffNonce: "nonce-1",
+    });
+  });
+
+  it("treats decline, cancel, and approved:false as a denial", async () => {
+    const channel = toolsChannel();
+    for (const response of [
+      { action: "decline" },
+      { action: "cancel" },
+      { action: "accept", content: { approved: false } },
+    ]) {
+      const invokeTool = fakeCore();
+      const args = routeArgs({ description: toolsDescription, invokeTool });
+      const first = await rpc(
+        channel,
+        modernRequest("tools/call", { arguments: {}, name: "deploy" }),
+        args,
+      );
+      const retried = await rpc(
+        channel,
+        modernRequest("tools/call", {
+          arguments: {},
+          inputResponses: { "dev.eve/approval": response },
+          name: "deploy",
+          requestState: first.result?.requestState,
+        }),
+        args,
+      );
+      expect(retried.result?.structuredContent).toEqual({
+        error: { code: "denied", message: "The person declined.", retryable: false },
+      });
+      expect(invokeTool.mock.calls[1]![2].approval).toEqual({ approved: false });
+    }
+  });
+
+  it("asks again, never declines, when the retry carries no answer", async () => {
+    const invokeTool = fakeCore();
+    const channel = toolsChannel();
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+    const first = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: {}, name: "deploy" }),
+      args,
+    );
+    const again = await rpc(
+      channel,
+      modernRequest("tools/call", {
+        arguments: {},
+        inputResponses: { "dev.eve/approval": { action: "accept", content: {} } },
+        name: "deploy",
+        requestState: first.result?.requestState,
+      }),
+      args,
+    );
+    expect(again.result?.resultType).toBe("input_required");
+    expect(again.result?.requestState).toEqual(expect.any(String));
+    expect(invokeTool.mock.calls[1]![2].approval).toBeUndefined();
+    expect(invokeTool.mock.calls[1]![2].callId).toBe("call_new");
+  });
+
+  it("ignores inputResponses without a requestState", async () => {
+    const invokeTool = fakeCore();
+    const called = await rpc(
+      toolsChannel(),
+      modernRequest("tools/call", {
+        arguments: {},
+        inputResponses: { "dev.eve/approval": { action: "accept", content: { approved: true } } },
+        name: "deploy",
+      }),
+      routeArgs({ description: toolsDescription, invokeTool }),
+    );
+    expect(called.result?.resultType).toBe("input_required");
+    expect(invokeTool.mock.calls[0]![2].approval).toBeUndefined();
+  });
+
+  it("refuses a forged, edited, or rebound requestState with -32602", async () => {
+    const invokeTool = fakeCore();
+    const channel = toolsChannel();
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+    const keyed = { meta: { "dev.eve/tool-session": "k1" } };
+    const first = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: { env: "prod" }, name: "deploy" }, keyed),
+      args,
+    );
+    const requestState = first.result?.requestState as string;
+    const answer = { "dev.eve/approval": { action: "accept", content: { approved: true } } };
+    const retries: Array<[Record<string, unknown>, ModernCall]> = [
+      [{ arguments: { env: "prod" }, name: "deploy", requestState: `${requestState}x` }, keyed],
+      [{ arguments: { env: "prod" }, name: "deploy", requestState: "v1.e30.AAAA" }, keyed],
+      [{ arguments: { env: "dev" }, name: "deploy", requestState }, keyed],
+      [{ arguments: { env: "prod" }, name: "plain", requestState }, keyed],
+      [
+        { arguments: { env: "prod" }, name: "deploy", requestState },
+        { meta: { "dev.eve/tool-session": "k2" } },
+      ],
+      [{ arguments: { env: "prod" }, name: "deploy", requestState }, {}],
+      [
+        { arguments: { env: "prod" }, name: "deploy", requestState },
+        { ...keyed, headers: { "x-test-principal": "user-2" } },
+      ],
+    ];
+    for (const [params, call] of retries) {
+      const refused = await rpc(
+        channel,
+        modernRequest("tools/call", { ...params, inputResponses: answer }, call),
+        args,
+      );
+      expect(refused.error).toEqual({
+        code: -32_602,
+        data: { reason: "invalid_request_state" },
+        message: "Invalid or expired requestState",
+      });
+    }
+    expect(invokeTool).toHaveBeenCalledTimes(1);
+
+    // A second channel holding only the same secret accepts the honest retry.
+    const other = toolsChannel();
+    const accepted = await rpc(
+      other,
+      modernRequest(
+        "tools/call",
+        { arguments: { env: "prod" }, inputResponses: answer, name: "deploy", requestState },
+        keyed,
+      ),
+      args,
+    );
+    expect(accepted.result?.content).toEqual([{ text: "deployed", type: "text" }]);
+    expect(invokeTool.mock.calls[1]![2]).toMatchObject({ callId: "call_new", key: "k1" });
+    expect(invokeTool.mock.calls[1]![2].oneOffNonce).toBeUndefined();
+
+    // Another secret does not.
+    const foreign = toolsChannel({ requestStateSecret: "y".repeat(32) });
+    const rejected = await rpc(
+      foreign,
+      modernRequest(
+        "tools/call",
+        { arguments: { env: "prod" }, inputResponses: answer, name: "deploy", requestState },
+        keyed,
+      ),
+      args,
+    );
+    expect(rejected.error?.code).toBe(-32_602);
+  });
+
+  it("asks for each sign-in by URL and retries into the same session", async () => {
+    const core = { signedIn: false };
+    const invokeTool = fakeCore(core);
+    const channel = toolsChannel();
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+    const first = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: {}, name: "issues" }),
+      args,
+    );
+    expect(first.result).toMatchObject({
+      _meta: { "dev.eve/authorization": { callId: "call_new", connections: ["linear"] } },
+      inputRequests: {
+        "dev.eve/authorization:linear": {
+          method: "elicitation/create",
+          params: {
+            message: "Sign in to linear to continue. Code: ABCD",
+            mode: "url",
+            url: "https://idp.example/a",
+          },
+        },
+      },
+      resultType: "input_required",
+    });
+
+    const retry = (requestState: unknown) =>
+      rpc(
+        channel,
+        modernRequest("tools/call", {
+          arguments: {},
+          inputResponses: { "dev.eve/authorization:linear": { action: "accept" } },
+          name: "issues",
+          requestState,
+        }),
+        args,
+      );
+    const early = await retry(first.result?.requestState);
+    expect(early.result?.resultType).toBe("input_required");
+    core.signedIn = true;
+    const done = await retry(early.result?.requestState);
+    expect(done.result).toMatchObject({ structuredContent: { count: 3 } });
+    expect(invokeTool.mock.calls[2]![2]).toMatchObject({
+      callId: "call_new",
+      oneOffNonce: "nonce-1",
+    });
+  });
+
+  it("never runs a sign-in retry without an accept for every requested connection", async () => {
+    for (const signedIn of [false, true]) {
+      const core = { signedIn: false };
+      const invokeTool = fakeCore(core);
+      const channel = toolsChannel();
+      const args = routeArgs({ description: toolsDescription, invokeTool });
+      const first = await rpc(
+        channel,
+        modernRequest("tools/call", { arguments: {}, name: "issues" }),
+        args,
+      );
+      expect(first.result?.resultType).toBe("input_required");
+      // Before or after the grant exists, an answer is still required.
+      core.signedIn = signedIn;
+      const retry = (requestState: unknown, inputResponses?: unknown) => {
+        const params: Record<string, unknown> = { arguments: {}, name: "issues", requestState };
+        if (inputResponses !== undefined) params.inputResponses = inputResponses;
+        return rpc(channel, modernRequest("tools/call", params), args);
+      };
+
+      for (const unanswered of [
+        undefined,
+        {},
+        { "dev.eve/authorization:other": { action: "accept" } },
+        { "dev.eve/authorization:linear": { action: "maybe" } },
+        { "dev.eve/approval": { action: "accept", content: { approved: true } } },
+      ]) {
+        const again = await retry(first.result?.requestState, unanswered);
+        // Same questions, a fresh state, nothing run.
+        expect(again.result).toMatchObject({
+          _meta: { "dev.eve/authorization": { callId: "call_new", connections: ["linear"] } },
+          inputRequests: first.result?.inputRequests,
+          resultType: "input_required",
+        });
+        expect(decodeState(again.result?.requestState)).toMatchObject({
+          callId: "call_new",
+          kind: "authorization",
+          nonce: "nonce-1",
+          signIns: [{ name: "linear", url: "https://idp.example/a", userCode: "ABCD" }],
+        });
+      }
+      for (const action of ["decline", "cancel"]) {
+        const refused = await retry(first.result?.requestState, {
+          "dev.eve/authorization:linear": { action },
+        });
+        expect(refused.result).toMatchObject({
+          isError: true,
+          structuredContent: { error: { code: "denied" } },
+        });
+      }
+      expect(invokeTool).toHaveBeenCalledTimes(1);
+
+      const accepted = await retry(first.result?.requestState, {
+        "dev.eve/authorization:linear": { action: "accept" },
+      });
+      expect(invokeTool).toHaveBeenCalledTimes(2);
+      expect(accepted.result?.resultType).toBe(signedIn ? "complete" : "input_required");
+    }
+  });
+
+  it("asks again for every connection when only some sign-ins are answered", async () => {
+    const invokeTool = vi.fn<InvokeToolFn>(async (_name, _input, options) => {
+      if (options.callId !== undefined) {
+        return { modelOutput: { type: "text", value: "ok" }, output: "ok", status: "completed" };
+      }
+      return {
+        callId: "call_two",
+        challenges: [
+          { challenge: { url: "https://idp.example/a" }, name: "linear" },
+          { challenge: { url: "https://idp.example/b" }, name: "github" },
+        ],
+        oneOffNonce: "nonce-2",
+        status: "authorization-required",
+      };
+    });
+    const channel = toolsChannel();
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+    const first = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: {}, name: "issues" }),
+      args,
+    );
+    const call = (inputResponses: unknown) =>
+      rpc(
+        channel,
+        modernRequest("tools/call", {
+          arguments: {},
+          inputResponses,
+          name: "issues",
+          requestState: first.result?.requestState,
+        }),
+        args,
+      );
+    const partial = await call({ "dev.eve/authorization:linear": { action: "accept" } });
+    expect(Object.keys(partial.result?.inputRequests ?? {})).toEqual([
+      "dev.eve/authorization:linear",
+      "dev.eve/authorization:github",
+    ]);
+    const oneDeclined = await call({
+      "dev.eve/authorization:github": { action: "decline" },
+      "dev.eve/authorization:linear": { action: "accept" },
+    });
+    expect(oneDeclined.result?.structuredContent.error.code).toBe("denied");
+    expect(invokeTool).toHaveBeenCalledTimes(1);
+    const both = await call({
+      "dev.eve/authorization:github": { action: "accept" },
+      "dev.eve/authorization:linear": { action: "accept" },
+    });
+    expect(both.result?.content).toEqual([{ text: "ok", type: "text" }]);
+    expect(invokeTool).toHaveBeenCalledTimes(2);
+  });
+
+  it("carries the approval answer into the sign-in round that follows it", async () => {
+    const core = { signedIn: false };
+    const invokeTool = fakeCore(core);
+    const channel = toolsChannel();
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+    const asked = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: {}, name: "deploy" }),
+      args,
+    );
+    const signIn = await rpc(
+      channel,
+      modernRequest("tools/call", {
+        arguments: {},
+        inputResponses: { "dev.eve/approval": { action: "accept", content: { approved: true } } },
+        name: "deploy",
+        requestState: asked.result?.requestState,
+      }),
+      args,
+    );
+    expect(signIn.result?.inputRequests).toHaveProperty(["dev.eve/authorization:linear"]);
+    core.signedIn = true;
+    const done = await rpc(
+      channel,
+      modernRequest("tools/call", {
+        arguments: {},
+        inputResponses: {
+          "dev.eve/approval": { action: "decline" },
+          "dev.eve/authorization:linear": { action: "accept" },
+        },
+        name: "deploy",
+        requestState: signIn.result?.requestState,
+      }),
+      args,
+    );
+    // The carried answer wins; an approval response on a sign-in round is ignored.
+    expect(done.result?.content).toEqual([{ text: "deployed", type: "text" }]);
+    expect(invokeTool.mock.calls[2]![2].approval).toEqual({ approved: true });
+  });
+
+  it("refuses input the client cannot render, before minting anything", async () => {
+    const cases: Array<[string, Readonly<Record<string, unknown>>]> = [
+      ["deploy", {}],
+      ["deploy", { elicitation: { url: {} } }],
+      ["issues", { elicitation: {} }],
+      ["issues", { elicitation: { form: {} } }],
+    ];
+    for (const [name, capabilities] of cases) {
+      const called = await rpc(
+        toolsChannel(),
+        modernRequest("tools/call", { arguments: {}, name }, { capabilities }),
+        routeArgs({ description: toolsDescription, invokeTool: fakeCore() }),
+      );
+      expect(called.result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "input_unsupported" } },
+      });
+    }
+    // A bare `elicitation: {}` implies form mode.
+    const bare = await rpc(
+      toolsChannel(),
+      modernRequest(
+        "tools/call",
+        { arguments: {}, name: "deploy" },
+        { capabilities: { elicitation: {} } },
+      ),
+      routeArgs({ description: toolsDescription, invokeTool: fakeCore() }),
+    );
+    expect(bare.result?.resultType).toBe("input_required");
+  });
+
+  it("refuses a sign-in challenge without a URL, naming the connection", async () => {
+    const called = await rpc(
+      toolsChannel(),
+      modernRequest("tools/call", { arguments: {}, name: "issues" }),
+      routeArgs({ description: toolsDescription, invokeTool: fakeCore({ challengeUrl: null }) }),
+    );
+    expect(called.result).toMatchObject({ isError: true });
+    expect(called.result?.structuredContent.error.message).toContain('"linear"');
+  });
+
+  it("answers input_unsupported on the stateless 2025 fallback", async () => {
+    const called = await rpc(
+      toolsChannel(),
+      mcpRequest({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: {}, name: "deploy" },
+      }),
+      routeArgs({ description: toolsDescription, invokeTool: fakeCore() }),
+    );
+    expect(called.result?.structuredContent.error.code).toBe("input_unsupported");
+  });
+
+  it("without a secret in production, fails paused calls naming the env var and runs plain ones", async () => {
+    const previous = { env: process.env.EVE_MCP_REQUEST_STATE_SECRET, dev: process.env.EVE_DEV };
+    delete process.env.EVE_MCP_REQUEST_STATE_SECRET;
+    delete process.env.EVE_DEV;
+    try {
+      const channel = toolsChannel({ requestStateSecret: undefined });
+      const args = routeArgs({ description: toolsDescription, invokeTool: fakeCore() });
+      const paused = await rpc(
+        channel,
+        modernRequest("tools/call", { arguments: {}, name: "deploy" }),
+        args,
+      );
+      expect(paused.result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "internal" } },
+      });
+      expect(paused.result?.structuredContent.error.message).toContain(
+        "EVE_MCP_REQUEST_STATE_SECRET",
+      );
+      expect(paused.result?.requestState).toBeUndefined();
+
+      const plain = await rpc(
+        channel,
+        modernRequest("tools/call", { arguments: { x: 2 }, name: "plain" }),
+        args,
+      );
+      expect(plain.result?.structuredContent).toEqual({ x: 2 });
+
+      const echoed = await rpc(
+        channel,
+        modernRequest("tools/call", { arguments: {}, name: "deploy", requestState: "anything" }),
+        args,
+      );
+      expect(echoed.error?.code).toBe(-32_602);
+    } finally {
+      if (previous.env !== undefined) process.env.EVE_MCP_REQUEST_STATE_SECRET = previous.env;
+      if (previous.dev !== undefined) process.env.EVE_DEV = previous.dev;
+    }
+  });
+
+  it("calls as the forwarded principal, with the forwarder in the session id", async () => {
+    const invokeTool = fakeCore();
+    const channel = toolsChannel({ trustedForwarders: () => true });
+    const args = routeArgs({ description: toolsDescription, invokeTool });
+    const header = Buffer.from(
+      JSON.stringify({
+        current: {
+          attributes: {},
+          authenticator: "oidc",
+          principalId: "end-user",
+          principalType: "user",
+        },
+      }),
+    ).toString("base64url");
+    const forwarded = {
+      headers: { "eve-forwarded-principal": header, "x-test-principal": "router" },
+    };
+    const first = await rpc(
+      channel,
+      modernRequest("tools/call", { arguments: {}, name: "deploy" }, forwarded),
+      args,
+    );
+    expect(invokeTool.mock.calls[0]![2]).toMatchObject({
+      auth: { attributes: { "eve:forwarded-by": "router" }, principalId: "end-user" },
+      forwarder: { principalId: "router" },
+      initiator: { principalId: "end-user" },
+    });
+
+    // The same state replayed by the same user without the forwarder is refused.
+    const answer = { "dev.eve/approval": { action: "accept", content: { approved: true } } };
+    const replayed = await rpc(
+      channel,
+      modernRequest(
+        "tools/call",
+        {
+          arguments: {},
+          inputResponses: answer,
+          name: "deploy",
+          requestState: first.result?.requestState,
+        },
+        { headers: { "x-test-principal": "end-user" } },
+      ),
+      args,
+    );
+    expect(replayed.error?.code).toBe(-32_602);
+
+    const malformed = await postHandler(channel)(
+      modernRequest("server/discover", {}, { headers: { "eve-forwarded-principal": "!!" } }),
+      args,
+    );
+    expect(malformed.status).toBe(400);
+  });
+
+  it("acknowledges subscriptions/listen, then closes the stream without a result", async () => {
+    const response = await postHandler(toolsChannel())(
+      modernRequest("subscriptions/listen", {
+        notifications: { promptsListChanged: true, toolsListChanged: true },
+      }),
+      routeArgs({ description: toolsDescription }),
+    );
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const text = await response.text();
+    const events = text
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      method: "notifications/subscriptions/acknowledged",
+      params: { notifications: { toolsListChanged: true } },
+    });
+    expect(events[0].params.notifications.promptsListChanged).toBeUndefined();
+  });
+});

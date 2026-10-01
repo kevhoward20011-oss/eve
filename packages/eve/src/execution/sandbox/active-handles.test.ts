@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   shutdownActiveSandboxHandles,
   trackActiveSandboxHandle,
+  untrackActiveSandboxHandle,
 } from "#execution/sandbox/active-handles.js";
 
 afterEach(async () => {
@@ -62,5 +63,27 @@ describe("shutdownActiveSandboxHandles", () => {
 
     expect(healthy.onRuntimeShutdown).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("provider unreachable"));
+  });
+
+  it("untracks a deleted handle but keeps one that replaced it", async () => {
+    const deleted = { onRuntimeShutdown: vi.fn(async () => {}) };
+    const replaced = { onRuntimeShutdown: vi.fn(async () => {}) };
+    const current = { onRuntimeShutdown: vi.fn(async () => {}) };
+    trackActiveSandboxHandle({ providerName: "docker", handle: deleted, sessionId: "session-1" });
+    untrackActiveSandboxHandle({ providerName: "docker", handle: deleted, sessionId: "session-1" });
+    trackActiveSandboxHandle({ providerName: "docker", handle: replaced, sessionId: "session-2" });
+    trackActiveSandboxHandle({ providerName: "docker", handle: current, sessionId: "session-2" });
+    // The older handle for session-2 is gone already; untracking it must not drop the newer one.
+    untrackActiveSandboxHandle({
+      providerName: "docker",
+      handle: replaced,
+      sessionId: "session-2",
+    });
+
+    await shutdownActiveSandboxHandles();
+
+    expect(deleted.onRuntimeShutdown).not.toHaveBeenCalled();
+    expect(replaced.onRuntimeShutdown).not.toHaveBeenCalled();
+    expect(current.onRuntimeShutdown).toHaveBeenCalledTimes(1);
   });
 });

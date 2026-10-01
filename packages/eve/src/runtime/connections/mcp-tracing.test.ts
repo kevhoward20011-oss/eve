@@ -281,6 +281,94 @@ describe("MCP trace propagation", () => {
     });
     expectInjectedSpanContext(fetcher, list!.spanContext());
   });
+  describe("requestMeta", () => {
+    const traceparent = `00-${"1".repeat(32)}-${"2".repeat(16)}-01`;
+    const sessionMeta = { "dev.eve/tool-session": "key-1" };
+    const requestMeta = (method: string) => (method === "tools/call" ? sessionMeta : undefined);
+
+    function makeFetch(injectContext: (context: unknown, carrier: Record<string, string>) => void) {
+      const fetcher = vi.fn(
+        async (_request: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
+          new Response(null),
+      );
+      const fetch = createMcpTraceFetch({
+        connectionName: "linear",
+        fetcher,
+        getActiveContext: () => ROOT_CONTEXT,
+        getProtocolVersion: () => undefined,
+        injectContext,
+        requestMeta,
+      });
+      return { fetch, fetcher };
+    }
+
+    function sentMeta(fetcher: ReturnType<typeof vi.fn>): Record<string, unknown> {
+      const init = fetcher.mock.calls[0]?.[1] as RequestInit | undefined;
+      return (JSON.parse(String(init?.body)) as { params: { _meta: Record<string, unknown> } })
+        .params._meta;
+    }
+
+    it("merges extra meta with existing meta and trace context", async () => {
+      const { fetch, fetcher } = makeFetch((_context, carrier) => {
+        carrier.traceparent = traceparent;
+      });
+
+      await fetch("https://mcp.example.com", {
+        body: JSON.stringify({
+          id: 1,
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: { _meta: { caller: "eve" }, arguments: {}, name: "get_issue" },
+        }),
+        method: "POST",
+      });
+
+      expect(sentMeta(fetcher)).toEqual({ ...sessionMeta, caller: "eve", traceparent });
+    });
+
+    it("still merges extra meta when trace context is skipped for size", async () => {
+      const { fetch, fetcher } = makeFetch((_context, carrier) => {
+        carrier.baggage = `vendor=${"x".repeat(8192)}`;
+      });
+
+      await fetch("https://mcp.example.com", {
+        body: JSON.stringify({
+          id: 1,
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: { arguments: {}, name: "get_issue" },
+        }),
+        method: "POST",
+      });
+
+      expect(sentMeta(fetcher)).toEqual(sessionMeta);
+    });
+
+    it("adds meta only for methods where requestMeta returns a value", async () => {
+      const { fetch, fetcher } = makeFetch(() => {});
+      const listInit = {
+        body: JSON.stringify({ id: 2, jsonrpc: "2.0", method: "tools/list", params: {} }),
+        method: "POST",
+      } satisfies RequestInit;
+
+      await fetch("https://mcp.example.com", listInit);
+      expect(fetcher.mock.calls[0]?.[1]).toBe(listInit);
+
+      await fetch("https://mcp.example.com", {
+        body: JSON.stringify({
+          id: 3,
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: { arguments: {}, name: "get_issue" },
+        }),
+        method: "POST",
+      });
+      const init = fetcher.mock.calls[1]?.[1] as RequestInit | undefined;
+      expect(
+        (JSON.parse(String(init?.body)) as { params: { _meta: unknown } }).params._meta,
+      ).toEqual(sessionMeta);
+    });
+  });
 });
 
 function expectInjectedSpanContext(

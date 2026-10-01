@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SessionAuthContext } from "#channel/types.js";
 import { z } from "#compiled/zod/index.js";
 import {
+  closeAfterListenAck,
   createMcpStreamableHttpServer,
   MCP_PROTOCOL_VERSION,
   MCP_REQUEST_BODY_MAX_BYTES,
@@ -525,5 +526,41 @@ describe("stateless MCP Streamable HTTP server", () => {
         version: "0",
       }),
     ).toThrow("MCP tool names must be unique");
+  });
+});
+
+describe("closeAfterListenAck", () => {
+  it("forwards events split across chunks up to the ack, then cancels the source", async () => {
+    const encoder = new TextEncoder();
+    const ack =
+      'data: {"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{}}\n\n';
+    const chunks = [
+      ": keepalive\n",
+      "\n",
+      ack.slice(0, 20),
+      ack.slice(20),
+      'data: {"id":1,"result":{}}\n\n',
+    ];
+    let cancelled = false;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = chunks.shift();
+        if (next === undefined) return;
+        controller.enqueue(encoder.encode(next));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const response = closeAfterListenAck(
+      new Response(source, { headers: { "content-type": "text/event-stream" } }),
+    );
+    await expect(response.text()).resolves.toBe(`: keepalive\n\n${ack}`);
+    expect(cancelled).toBe(true);
+  });
+
+  it("passes JSON responses through", async () => {
+    const response = Response.json({ error: { code: -32_602 } });
+    expect(closeAfterListenAck(response)).toBe(response);
   });
 });

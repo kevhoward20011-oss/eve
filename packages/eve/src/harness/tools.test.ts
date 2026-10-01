@@ -19,6 +19,12 @@ import type { JsonObject } from "#shared/json.js";
 import { isAsyncIterable } from "#shared/async-iterable.js";
 import type { HarnessToolDefinition } from "#harness/execute-tool.js";
 import { buildToolApproval, buildToolSet, buildToolSetWithProviderTools } from "#harness/tools.js";
+import { readToolInterrupt } from "#harness/tool-interrupts.js";
+import {
+  isRemoteInputPendingOutput,
+  remoteInputPendingModelText,
+  requestRemoteInput,
+} from "#harness/remote-input.js";
 import type { HarnessToolMap } from "#harness/types.js";
 import { createToolExecuteWithAuth } from "#execution/tool-auth.js";
 import type { ApprovalContext } from "#approval/definition.js";
@@ -108,6 +114,51 @@ async function projectSdkToolOutput(input: {
 }
 
 describe("buildToolSet", () => {
+  it("hides a remote input signal's retry payload from the model", async () => {
+    const signal = requestRemoteInput({
+      approve: {
+        attempt: 1,
+        inputResponses: { confirm: { action: "accept", content: { approved: true } } },
+        requestState: "opaque-state-SECRET",
+      },
+      connection: "billing",
+      prompt: "Approve the refund?",
+    });
+    const tools: HarnessToolMap = new Map<string, HarnessToolDefinition>([
+      [
+        "remote",
+        {
+          description: "Calls a remote agent.",
+          execute: () => signal,
+          inputSchema: jsonSchema({ type: "object" }),
+          name: "remote",
+          // An authored projection must not see the pending placeholder either.
+          toModelOutput: () => ({ type: "json", value: { leaked: true } }),
+        },
+      ],
+    ]);
+    const ctx = new ContextContainer();
+    const result = buildToolSet({ tools });
+    const output = await contextStorage.run(ctx, () =>
+      executeSdkTool({ tool: result.remote, toolCallId: "call_remote" }),
+    );
+
+    expect(isRemoteInputPendingOutput(output)).toBe(true);
+    expect(JSON.stringify(output)).not.toContain("requestState");
+    expect(readToolInterrupt(ctx, "call_remote")).toBe(signal);
+
+    const modelOutput = await projectSdkToolOutput({
+      output,
+      tool: result.remote,
+      toolCallId: "call_remote",
+    });
+    expect(modelOutput).toEqual({ type: "text", value: remoteInputPendingModelText("billing") });
+    const serialized = JSON.stringify(modelOutput);
+    expect(serialized).not.toContain("requestState");
+    expect(serialized).not.toContain("opaque-state-SECRET");
+    expect(serialized).not.toContain("Approve the refund?");
+  });
+
   it("forwards the AI SDK execute options to the tool definition", async () => {
     const abortController = new AbortController();
     let receivedOptions: ToolExecuteOptions | undefined;
