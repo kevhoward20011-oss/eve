@@ -136,10 +136,10 @@ describe("mcpChannel tools over real HTTP", () => {
       },
     );
     signedInFlag = join(app.appRoot, "signed-in.flag");
-    [first, second] = await Promise.all([
-      startServer(app.appRoot, signedInFlag),
-      startServer(app.appRoot, signedInFlag),
-    ]);
+    // One at a time: both share the app's local workflow world, and two
+    // processes initializing it at once can read its version file half-written.
+    first = await startServer(app.appRoot, signedInFlag);
+    second = await startServer(app.appRoot, signedInFlag);
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
