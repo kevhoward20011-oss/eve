@@ -36,7 +36,10 @@ export function withAgentToolContentPolicy(
         : {
             update: mcp.update,
             error(error, type) {
-              mcp.error(policy.recordOutputs ? error : undefined, type);
+              mcp.error(
+                policy.recordOutputs ? error : undefined,
+                type ?? (error instanceof Error ? error.name : undefined),
+              );
             },
             arguments(value) {
               if (policy.recordInputs) mcp.arguments(value);

@@ -19,7 +19,7 @@ import type { AgentActionTraceState, AgentTraceStateStore } from "#tracing/agent
 import { normalizeChannelAudience } from "#shared/channel-audience.js";
 import { isSampledTrace } from "#tracing/sampled-trace.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
-import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
+import { eveScopeRecord, checkpointContent } from "#tracing/adapters/eve/checkpointer.js";
 import type { RuntimeScope } from "#tracing/core/scopes.js";
 import type { AgentTracing } from "#tracing/core/agent-tracing.js";
 
@@ -117,8 +117,7 @@ export function createAgentActionInstrumentation(input: {
             callId: state.callId,
             kind: state.kind,
             name: state.name,
-            arguments:
-              state.inputAttribute === undefined ? undefined : JSON.parse(state.inputAttribute),
+            arguments: checkpointContent(state.inputAttribute),
           },
         },
       ),

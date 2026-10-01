@@ -14,7 +14,7 @@ import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { normalizeChannelAudience, type ChannelAudience } from "#shared/channel-audience.js";
-import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
+import { eveScopeRecord, checkpointContent } from "#tracing/adapters/eve/checkpointer.js";
 import type { AgentTracing } from "#tracing/core/agent-tracing.js";
 
 interface AgentApprovalSpanState {
@@ -108,8 +108,7 @@ export function createAgentApprovalInstrumentation(input: {
             callId: state.actionCallId,
             actionName: state.actionName,
             requestId: state.requestId,
-            request:
-              state.requestAttribute === undefined ? undefined : JSON.parse(state.requestAttribute),
+            request: checkpointContent(state.requestAttribute),
           },
         },
       ),

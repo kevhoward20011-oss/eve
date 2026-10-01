@@ -169,7 +169,6 @@ Configure every adapter through `createAgentTracing`. Consumers use callback or
 lifecycle methods for usage, protocol metadata, payloads, and errors.
 Attribute builders are private implementation details, not API entry points.
 
-
 ## Span topology and lifetime
 
 ```text

@@ -1,6 +1,7 @@
 import type { AgentSessionTraceState, AgentTurnTraceState } from "#tracing/agent-trace-state.js";
 import { normalizeInstrumentationChannelKind } from "#internal/instrumentation.js";
 import type { TurnMetadata } from "#tracing/core/scopes.js";
+import { checkpointContent } from "#tracing/adapters/eve/checkpointer.js";
 
 /** Converts eve-owned session metadata to the lifecycle DSL's semantic input. */
 export function agentActivationMetadata(input: {
@@ -50,10 +51,7 @@ export function agentActivationMetadata(input: {
             id: delivery.deliveryId,
             channelName: delivery.channelName,
             requestId: delivery.requestId,
-            input:
-              delivery.inputAttribute === undefined
-                ? undefined
-                : JSON.parse(delivery.inputAttribute),
+            input: checkpointContent(delivery.inputAttribute),
           },
   };
 }

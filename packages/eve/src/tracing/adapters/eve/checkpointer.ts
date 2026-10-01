@@ -3,6 +3,16 @@ import type { TraceLink, TraceReference } from "#tracing/core/types.js";
 import { resolveConversationId } from "#shared/conversation-identity.js";
 import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 
+export function checkpointContent(value: string | undefined): unknown {
+  if (value === undefined) return undefined;
+  // Historical checkpoints contain truncated JSON; omit payloads, not the operation.
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Converts existing workflow checkpoint records; does not create another state owner. */
 export function eveScopeRecord(
   input: {

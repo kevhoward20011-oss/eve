@@ -1085,104 +1085,109 @@ describe("createAgentOtelInstrumentation", () => {
     },
   );
 
-  it("maps one channel delivery onto its activation with an HTTP request link", async () => {
-    const runtime = createRuntime();
-    const ctx = new ContextContainer();
-    const requestTraceContext = {
-      spanId: "2222222222222222",
-      traceFlags: 1,
-      traceId: "22222222222222222222222222222222",
-    };
-    const started = {
-      agentName: "support",
-      delivery: {
+  it.each(["private", "x".repeat(CONTENT_ATTRIBUTE_LIMIT * 2)])(
+    "maps a channel delivery onto its activation despite bounded content (case %#)",
+    async (message) => {
+      const runtime = createRuntime();
+      const ctx = new ContextContainer();
+      const requestTraceContext = {
+        spanId: "2222222222222222",
+        traceFlags: 1,
+        traceId: "22222222222222222222222222222222",
+      };
+      const started = {
+        agentName: "support",
+        delivery: {
+          channelAudience: "public" as const,
+          channelKind: "channel:slack",
+          channelName: "slack",
+          deliveryId: "delivery-1",
+          requestId: "iad1::request-1",
+          requestTraceContext,
+        },
+        idempotencyKey: "channel-delivery:session-1:delivery-1",
+        input: { message },
+        rootSessionId: "session-1",
+        sequence: 0,
+        sessionId: "session-1",
+        turnId: "turn_0",
+        type: "channel.delivery.started" as const,
+      };
+      const completed = {
+        agentName: started.agentName,
+        delivery: started.delivery,
+        idempotencyKey: started.idempotencyKey,
+        outcome: "completed" as const,
+        rootSessionId: started.rootSessionId,
+        sequence: 0,
+        sessionId: started.sessionId,
+        turnId: "turn_0",
+        type: "channel.delivery.completed" as const,
+      };
+      const sessionEvent = {
+        agentName: "support",
         channelAudience: "public" as const,
         channelKind: "channel:slack",
-        channelName: "slack",
-        deliveryId: "delivery-1",
-        requestId: "iad1::request-1",
-        requestTraceContext,
-      },
-      idempotencyKey: "channel-delivery:session-1:delivery-1",
-      input: { message: "private" },
-      rootSessionId: "session-1",
-      sequence: 0,
-      sessionId: "session-1",
-      turnId: "turn_0",
-      type: "channel.delivery.started" as const,
-    };
-    const completed = {
-      agentName: started.agentName,
-      delivery: started.delivery,
-      idempotencyKey: started.idempotencyKey,
-      outcome: "completed" as const,
-      rootSessionId: started.rootSessionId,
-      sequence: 0,
-      sessionId: started.sessionId,
-      turnId: "turn_0",
-      type: "channel.delivery.completed" as const,
-    };
-    const sessionEvent = {
-      agentName: "support",
-      channelAudience: "public" as const,
-      channelKind: "channel:slack",
-      idempotencyKey: sessionIdempotencyKey("session-1"),
-      rootSessionId: "session-1",
-      sessionId: "session-1",
-      type: "session.started" as const,
-    };
-    const turnEvent = {
-      idempotencyKey: turnIdempotencyKey("session-1", "turn_0"),
-      rootSessionId: "session-1",
-      sequence: 0,
-      sessionId: "session-1",
-      turnId: "turn_0",
-      type: "turn.started" as const,
-    };
+        idempotencyKey: sessionIdempotencyKey("session-1"),
+        rootSessionId: "session-1",
+        sessionId: "session-1",
+        type: "session.started" as const,
+      };
+      const turnEvent = {
+        idempotencyKey: turnIdempotencyKey("session-1", "turn_0"),
+        rootSessionId: "session-1",
+        sequence: 0,
+        sessionId: "session-1",
+        turnId: "turn_0",
+        type: "turn.started" as const,
+      };
 
-    await contextStorage.run(ctx, async () => {
-      await runtime.prepareSessionTrace(sessionEvent);
-      await runtime.prepareTurnTrace(turnEvent);
-      await runtime.hooks.publish(started);
-      await runtime.hooks.publish(sessionEvent);
-      await runtime.hooks.publish(turnEvent);
-      ctx.set(ActiveChannelDeliveriesKey, [
-        {
-          agentName: started.agentName,
-          delivery: started.delivery,
-          policyAgentName: started.agentName,
-          rootSessionId: started.rootSessionId,
-          traceSessionId: started.rootSessionId,
-          sequence: 0,
-          sessionId: started.sessionId,
-          turnId: "turn_0",
-        },
+      await contextStorage.run(ctx, async () => {
+        await runtime.prepareSessionTrace(sessionEvent);
+        await runtime.prepareTurnTrace(turnEvent);
+        await runtime.hooks.publish(started);
+        await runtime.hooks.publish(sessionEvent);
+        await runtime.hooks.publish(turnEvent);
+        ctx.set(ActiveChannelDeliveriesKey, [
+          {
+            agentName: started.agentName,
+            delivery: started.delivery,
+            policyAgentName: started.agentName,
+            rootSessionId: started.rootSessionId,
+            traceSessionId: started.rootSessionId,
+            sequence: 0,
+            sessionId: started.sessionId,
+            turnId: "turn_0",
+          },
+        ]);
+        await runtime.hooks.publish(completed);
+        await completeTurn(runtime.hooks, "session-1", "turn_0");
+      });
+
+      const spans = runtime.exporter.getFinishedSpans();
+      const turn = spans.find((span) => span.name === "invoke_agent support")!;
+      expect(byName(spans, "agent.channel.delivery")).toHaveLength(0);
+      expect(turn.parentSpanContext).toBeUndefined();
+      expect(turn.links).toEqual([
+        expect.objectContaining({
+          attributes: { "eve.link.type": "channel.request" },
+          context: expect.objectContaining(requestTraceContext),
+        }),
       ]);
-      await runtime.hooks.publish(completed);
-      await completeTurn(runtime.hooks, "session-1", "turn_0");
-    });
-
-    const spans = runtime.exporter.getFinishedSpans();
-    const turn = spans.find((span) => span.name === "invoke_agent support")!;
-    expect(byName(spans, "agent.channel.delivery")).toHaveLength(0);
-    expect(turn.parentSpanContext).toBeUndefined();
-    expect(turn.links).toEqual([
-      expect.objectContaining({
-        attributes: { "eve.link.type": "channel.request" },
-        context: expect.objectContaining(requestTraceContext),
-      }),
-    ]);
-    expect(turn.attributes).toMatchObject({
-      "agent.channel.delivery.id": "delivery-1",
-      "agent.channel.delivery.input": JSON.stringify({ message: "private" }),
-      "agent.channel.kind": "channel:slack",
-      "agent.channel.name": "slack",
-      "agent.channel.request.id": "iad1::request-1",
-      "agent.turn.id": "turn_0",
-      "agent.turn.sequence": 0,
-      "gen_ai.conversation.id": "session-1",
-    });
-  });
+      expect(turn.attributes).toMatchObject({
+        "agent.channel.delivery.id": "delivery-1",
+        "agent.channel.kind": "channel:slack",
+        "agent.channel.name": "slack",
+        "agent.channel.request.id": "iad1::request-1",
+        "agent.turn.id": "turn_0",
+        "agent.turn.sequence": 0,
+        "gen_ai.conversation.id": "session-1",
+      });
+      if (message === "private")
+        expect(turn.attributes["agent.channel.delivery.input"]).toBe(JSON.stringify({ message }));
+      else expect(turn.attributes["agent.channel.delivery.input"]).toBeUndefined();
+    },
+  );
 
   it("does not emit delivery spans when remote deliveries fan in before the session event", async () => {
     const runtime = createRuntime();
