@@ -45,7 +45,11 @@ import { defineTool, type ToolContext } from "#tools/definition.js";
 import type { DynamicToolSet } from "#tools/dynamic.js";
 import { defineJsonSchema } from "#tools/schema.js";
 
-import { connectionExecuteApproval, releaseApprovalPin } from "./connection-approval.js";
+import {
+  connectionExecuteApproval,
+  pinRemoteInputInstance,
+  releaseApprovalPin,
+} from "./connection-approval.js";
 import {
   closestToolNames,
   rankConnectionTools,
@@ -430,6 +434,7 @@ async function executeConnectionTool(
     if (++attempt > MAX_REMOTE_INPUT_ASKS) {
       return fail(`${toolName} asked for input ${MAX_REMOTE_INPUT_ASKS} times without finishing.`);
     }
+    pinRemoteInputInstance(ctx.callId, connection);
     return requestRemoteInput({
       approve: {
         attempt,

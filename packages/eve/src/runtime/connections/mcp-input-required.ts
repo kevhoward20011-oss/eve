@@ -52,6 +52,8 @@ export type McpScopedOutcome<T> =
 interface McpRequestScope {
   inputRequired?: McpInputRequiredResult;
   invalid?: string;
+  /** Set once the call's first response arrives; the SDK ignores any later one. */
+  answered?: boolean;
   readonly retry?: McpInputRetry;
 }
 
@@ -72,6 +74,8 @@ const scopes = new AsyncLocalStorage<McpRequestScope>();
  * other failure is rethrown unchanged.
  */
 export async function runMcpRequestScope<T>(input: {
+  /** An aborted call is cancelled, never turned into an input request. */
+  readonly abortSignal?: AbortSignal;
   readonly execute: () => Promise<T>;
   readonly retry?: McpInputRetry;
 }): Promise<McpScopedOutcome<T>> {
@@ -80,11 +84,17 @@ export async function runMcpRequestScope<T>(input: {
   try {
     value = await scopes.run(scope, input.execute);
   } catch (error) {
+    if (input.abortSignal?.aborted === true) throw error;
     if (scope.invalid !== undefined) throw new Error(scope.invalid, { cause: error });
     if (scope.inputRequired !== undefined) {
       return { status: "input_required", ...scope.inputRequired };
     }
     throw error;
+  }
+  if (scope.invalid !== undefined || scope.inputRequired !== undefined) {
+    // The SDK's error was swallowed inside `execute` (a trace span); an abort
+    // that raced the capture still wins.
+    input.abortSignal?.throwIfAborted();
   }
   if (scope.invalid !== undefined) throw new Error(scope.invalid);
   if (scope.inputRequired !== undefined) {
@@ -204,9 +214,15 @@ function sseScanner(id: unknown, scope: McpRequestScope): TransformStream<Uint8A
   const decoder = new TextDecoder();
   let buffer = "";
   let data: string[] = [];
+  let eventType = "";
   const flushEvent = () => {
-    if (data.length > 0) inspectMessage(parseJson(data.join("\n")), id, scope);
+    // The SDK dispatches only unnamed and `message` events; any other event
+    // type never reaches it, so it must not decide the call's outcome either.
+    if (data.length > 0 && (eventType === "" || eventType === "message")) {
+      inspectMessage(parseJson(data.join("\n")), id, scope);
+    }
     data = [];
+    eventType = "";
   };
   const scanLines = (final: boolean) => {
     // A trailing CR may be the first half of a CRLF split across chunks; hold
@@ -218,8 +234,11 @@ function sseScanner(id: unknown, scope: McpRequestScope): TransformStream<Uint8A
     for (const line of lines) {
       if (line === "") flushEvent();
       else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /u, ""));
+      else if (line.startsWith("event:")) eventType = line.slice(6).replace(/^ /u, "");
     }
-    if (final) flushEvent();
+    // An event still open at end of stream is discarded, as the SDK's
+    // parser does: it never answers the call, so it must not be captured.
+    if (final) data = [];
   };
   return new TransformStream({
     transform(chunk, controller) {
@@ -246,7 +265,11 @@ function parseJson(text: string): unknown {
 
 function inspectMessage(value: unknown, id: unknown, scope: McpRequestScope): void {
   for (const message of Array.isArray(value) ? value : [value]) {
-    if (!isObject(message) || message["id"] !== id || !isObject(message["result"])) continue;
+    if (!isObject(message) || message["id"] !== id) continue;
+    if (scope.answered === true) continue;
+    if (!isObject(message["result"]) && message["error"] === undefined) continue;
+    scope.answered = true;
+    if (!isObject(message["result"])) continue;
     const result = message["result"];
     if (result["resultType"] !== "input_required") continue;
     const parsed = parseInputRequiredResult(result);

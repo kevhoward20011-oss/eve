@@ -236,6 +236,7 @@ export class McpConnectionClient implements ConnectionClient {
             });
 
       const outcome = await runMcpRequestScope({
+        abortSignal: options.abortSignal,
         execute: async () =>
           await withMcpToolCallSpan({
             arguments: args,
@@ -245,7 +246,9 @@ export class McpConnectionClient implements ConnectionClient {
                 return await execute(resolvedArgs, { abortSignal: options.abortSignal } as never);
               } catch (error) {
                 // Not a failure: the span records the result type, never `requestState`.
-                if (hasScopedInputRequired()) return { resultType: "input_required" };
+                if (hasScopedInputRequired() && options.abortSignal?.aborted !== true) {
+                  return { resultType: "input_required" };
+                }
                 throw error;
               }
             },
