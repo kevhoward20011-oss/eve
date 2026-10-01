@@ -7,8 +7,6 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { renderSelfModificationConfig } from "./setup.js";
-
 const runFile = promisify(execFile);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const temporaryRoots: string[] = [];
@@ -77,6 +75,7 @@ describe("packed package consumption", () => {
 
   it("builds a fresh app using only installed tarball contents", async () => {
     await access(join(packageRoot, "dist/src/index.js"));
+    await access(join(packageRoot, "dist/src/self-modification/deployed/extension.js"));
     await access(join(packageRoot, "dist/src/self-modification/agent.js"));
     await access(join(packageRoot, "dist/src/self-modification/config.js"));
     await access(join(packageRoot, "dist/src/self-modification/sandbox.js"));
@@ -140,7 +139,6 @@ describe("packed package consumption", () => {
           type: "module",
           scripts: { build: "eve build" },
           dependencies: {
-            "@vercel/connect": "2.2.0",
             eve: `file:${eveTarball}`,
             "just-bash": "3.1.0",
             microsandbox: "0.5.5",
@@ -161,18 +159,6 @@ describe("packed package consumption", () => {
       'import { defineAgent } from "eve";\n\nexport default defineAgent({ model: "openai/gpt-5.4" });\n',
     );
     await writeAppFile(appRoot, "agent/instructions.md", "You are a test agent.\n");
-    await writeAppFile(
-      appRoot,
-      "agent/extensions/self-modification/extension.ts",
-      renderSelfModificationConfig({
-        branch: "main",
-        channelNames: [],
-        connector: "github/selfmod-acme-agent",
-        directory: ".",
-        repository: "github.com/acme/agent",
-        vercelBackend: true,
-      }),
-    );
 
     await run(
       "pnpm",
@@ -201,6 +187,41 @@ if (compiled.subagents.length !== 1 || subagent === undefined || !subagent.agent
 `,
     );
     await run("node", ["verify-development-extension.mjs"], appRoot);
+    await writeAppFile(
+      appRoot,
+      "agent/extensions/self-modification.ts",
+      `import selfModification from "eve/self-modification/deployed";
+export default selfModification({
+  authorize: () => true,
+  repository: "acme/agents",
+  directory: ".",
+  baseBranch: "main",
+  github: { connector: "github/agent-author" },
+});
+`,
+    );
+    await writeAppFile(
+      appRoot,
+      "verify-deployed-extension.mjs",
+      `import assert from "node:assert/strict";
+import { discoverAgent } from "./node_modules/eve/dist/src/discover/discover-agent.js";
+import { compileAgentManifest } from "./node_modules/eve/dist/src/compiler/normalize-manifest.js";
+
+process.env.VERCEL = "1";
+const discovered = await discoverAgent({ appRoot: process.cwd(), agentRoot: process.cwd() + "/agent" });
+assert.deepEqual(discovered.diagnostics.filter((entry) => entry.severity === "error"), []);
+const compiled = await compileAgentManifest(discovered.manifest);
+const child = compiled.subagents.find((entry) => entry.name === "self-modification__agent");
+assert.ok(child);
+assert.ok(child.agent.extensionMounts.some((mount) => mount.namespace === "code"));
+assert.ok(child.agent.tools.some((tool) => tool.name === "code__gh"));
+assert.ok(!compiled.tools.some((tool) => tool.name === "code__gh"));
+assert.ok(!child.agent.tools.some((tool) => tool.name.includes("computer")));
+assert.ok(compiled.subagents.some((entry) => entry.parentNodeId === child.nodeId));
+`,
+    );
+    await run("node", ["verify-deployed-extension.mjs"], appRoot);
+    await rm(join(appRoot, "agent/extensions/self-modification.ts"));
     const build = await run("pnpm", ["exec", "eve", "build", "--skip-sandbox-prewarm"], appRoot);
     const output = `${build.stdout}\n${build.stderr}`;
     if (output.includes("Could not resolve '#shared/")) {

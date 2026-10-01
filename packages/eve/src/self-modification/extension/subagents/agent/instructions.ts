@@ -1,7 +1,6 @@
 import { defineDynamic, defineInstructions } from "eve/instructions";
 
-import { resolveSelfModificationConfig } from "../../../config.js";
-import { resolveSelfModificationMode } from "../../../mode.js";
+import { isLocalSelfModificationEnabled, resolveSelfModificationConfig } from "../../../config.js";
 import selfModification from "../../extension.js";
 import { renderLocalSelfModificationExtension } from "../../../scaffold.js";
 
@@ -45,19 +44,13 @@ Skip task lists for simple work - only use them for complex actions. Never spend
 
 Treat a successful file-edit tool result as confirmation; do not reread a file solely to verify that the edit succeeded. Do not approximate unavailable build or test commands with broad source searches.`;
 
-const localReportingGuidance = `## Report results
+const reportingGuidance = `## Report results
 
 For source-modification tasks, return a concise handoff to the caller. Use at most four short bullets covering changed paths and behavior, and any required setup or unresolved issues.
 
 For investigation tasks, report the findings and supporting evidence requested by the caller.`;
 
-const deployedReportingGuidance = `## Report results
-
-For source-modification tasks, return a concise handoff to the caller. Use at most four short bullets covering changed paths and behavior, and any required setup or unresolved issues. Include the draft pull request URL if one was published.
-
-For investigation tasks, report the findings and supporting evidence requested by the caller.`;
-
-const localGuidance = `## Local environment
+const localEnvironment = `## Local environment
 
 The registry_add tool will complete installation for items that need no setup. In the local dev TUI, a \`needs-terminal\` result from the tool call automatically opens the existing setup panel for the user to complete setup there. In headless development, if a \`needs-terminal\` result includes \`nextCommand\`, present that exact value as the only shell command in your response. Never infer, construct, or rewrite a command: installing an item uses \`eve add <item>\`; \`eve registry add\` configures registry namespace mappings and does not install items.
 
@@ -71,14 +64,6 @@ Only when the requester explicitly names the self-modification subagent, edit wh
 \`\`\`ts
 ${renderLocalSelfModificationExtension()}\`\`\``;
 
-const deployedGuidance = `## Deployed environment
-
-The registry_add tool may return \`completed\`, \`input-required\`, \`external-action-required\`, \`cancelled\`, or \`failed\`. Supply only non-secret structured answers when continuing an \`input-required\` setup; set \`installed: true\` so the continuation does not reinstall source. Never request, accept, or repeat secret values. External authorization and secret binding are incomplete follow-up boundaries, not evidence that an integration is active.
-
-The configured target branch is checked out as a disposable workspace under /workspace/repository. Make ordinary changes through /source, which is the writable view of the configured application's agent/ directory. Publication validates the final repository snapshot, including registry, manifest, and lockfile changes. Never modify Git refs, access GitHub directly, or use shell commands to write files. The sandbox has no reusable GitHub credential after checkout.
-
-Complete all edits and registry installations before publication, and call publish by itself. Before publication, review and summarize the complete intended scope. Call publish once with a concise title and summary. A successful result is only a draft pull request. Return its URL and changed paths, and state that merge and deployment have not occurred.`;
-
 function renderInstructions(sections: readonly string[]): string {
   return sections.filter((section) => section.length > 0).join("\n\n");
 }
@@ -86,10 +71,9 @@ function renderInstructions(sections: readonly string[]): string {
 export default defineDynamic({
   events: {
     "session.started": () => {
-      const mode = resolveSelfModificationMode(
-        resolveSelfModificationConfig(selfModification.config),
-      );
-      if (mode !== "local" && mode !== "deployed") return null;
+      if (!isLocalSelfModificationEnabled(resolveSelfModificationConfig(selfModification.config))) {
+        return null;
+      }
 
       return defineInstructions({
         markdown: renderInstructions([
@@ -99,10 +83,10 @@ export default defineDynamic({
           toolAuthoring,
           registryWorkflow,
           documentationGuidance,
-          mode === "local" ? localGuidance : deployedGuidance,
+          localEnvironment,
           workingGuidance,
           selfModificationSubagentGuidance,
-          mode === "local" ? localReportingGuidance : deployedReportingGuidance,
+          reportingGuidance,
         ]),
       });
     },

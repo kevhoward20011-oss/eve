@@ -12,16 +12,18 @@ import { DEFAULT_AGENT_MODEL_ID, DEFAULT_AGENT_REASONING } from "#shared/default
 import { getLocalDevCapability } from "eve/local-dev";
 
 import selfModification from "../../extension.js";
-import { resolveSelfModificationConfig, type SelfModificationConfig } from "../../../config.js";
-import { hasGitHubCredential } from "../../../credentials.js";
-import { resolveSelfModificationMode } from "../../../mode.js";
+import {
+  isLocalSelfModificationEnabled,
+  resolveSelfModificationConfig,
+  type SelfModificationConfig,
+} from "../../../config.js";
 
 /** Fallback model when neither the self-modification agent nor its parent configures one. */
 export const FALLBACK_SELF_MODIFICATION_MODEL = DEFAULT_AGENT_MODEL_ID;
 
 /** Configuration for the self-modification subagent. */
 export interface SelfModificationAgentOptions {
-  /** Policy shared with the sandbox and extension mount. */
+  /** Local policy shared with the sandbox and extension mount. */
   readonly config?: SelfModificationConfig;
   /** Model used by the self-modification subagent; defaults to the effective parent model. */
   readonly model?: AgentStaticModelDefinition;
@@ -56,21 +58,16 @@ const repairDelegation =
   "If a tool or capability created or changed by this subagent later fails or behaves incorrectly, explain the observed problem and offer to delegate a repair. " +
   "Do not start the repair until the user confirms. Treat that confirmation as a source-modification request and delegate it immediately, including the exact identifier, failing behavior, expected behavior, and existing constraints.";
 
-const localIntegrationDelegation =
+const integrationDelegation =
   "Delegate questions about which integrations, channels, connections, or capabilities are available to add: the subagent searches the eve registry and reports exact item addresses instead of guessing them.";
 
-const deployedIntegrationDelegation =
-  "Delegate requests to add integrations, channels, connections, or capabilities: the subagent searches the official eve registry and can install source changes into the draft proposal. Setup may require non-secret answers or an external action, and secret binding remains separate.";
-
-const localTraceDelegation =
+const traceDelegation =
   "Delegate requests to investigate, diagnose, or optimize the agent's behavior from local traces to this subagent: it can inspect the invoking session's trace and make persistent source changes when warranted.";
 
-const localEffectiveEdits =
+const effectiveEdits =
   "Source edits do not affect the caller’s current turn. After this subagent reports changes, do not invoke edited tools or attempt runtime verification until a new user turn.";
-const deployedEffectiveEdits =
-  "Source edits do not affect the caller’s current turn. The subagent can publish only a draft pull request, and changes become effective only after review, merge, and redeployment.";
 
-/** Defines the environment-aware self-modification dynamic subagent. */
+/** Defines the local self-modification dynamic subagent. */
 export function defineSelfModificationAgent(
   options: SelfModificationAgentOptions = {},
 ): DynamicSentinel<DynamicSubagentDefinition | null> {
@@ -82,37 +79,21 @@ export function defineSelfModificationAgent(
       bound.reasoning ??
       (configuredModel === undefined ? DEFAULT_AGENT_REASONING : undefined);
     const config = resolveSelfModificationConfig(options.config ?? bound);
-    const mode = resolveSelfModificationMode(config);
+    if (!isLocalSelfModificationEnabled(config) || getLocalDevCapability() === undefined) {
+      return null;
+    }
     const model = configuredModel ?? FALLBACK_SELF_MODIFICATION_MODEL;
     const description = renderDescription([
       "Delegate here immediately when the user asks to change the self-modification subagent's model, reasoning, or configuration. Also delegate when the user asks to change this eve agent or its authored source.",
       sourceDelegation,
       persistenceDelegation,
       namedInstallationDelegation,
-      mode === "local" ? localIntegrationDelegation : deployedIntegrationDelegation,
-      mode === "local" ? localTraceDelegation : "",
+      integrationDelegation,
+      traceDelegation,
       followUpDelegation,
       repairDelegation,
-      mode === "local" ? localEffectiveEdits : deployedEffectiveEdits,
+      effectiveEdits,
     ]);
-    if (mode === "local") {
-      if (getLocalDevCapability() === undefined) return null;
-      return defineAgent({ description, model, reasoning });
-    }
-    if (mode !== "deployed" || config.deployed === undefined) return null;
-    if (config.deployed.credentials.kind === "pat" && !hasGitHubCredential()) return null;
-    try {
-      if (
-        !(await config.deployed.authorize({
-          channel: ctx.channel,
-          principal: ctx.session.auth.current,
-        }))
-      ) {
-        return null;
-      }
-    } catch {
-      return null;
-    }
     return defineAgent({ description, model, reasoning });
   };
 

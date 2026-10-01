@@ -157,46 +157,13 @@ describe("resolveRegistryAddTool", () => {
     expect(Object.keys((tool.inputSchema as { properties: object }).properties)).toEqual([
       "address",
     ]);
+    // Failed installs report unrestored paths; the closed schema must admit them.
+    expect((tool.outputSchema as { properties: object }).properties).toHaveProperty("changed");
   });
 
-  it("resolves the deployed lifecycle with continuation arguments and outcomes", () => {
+  it("is absent outside local development", () => {
     delete process.env.EVE_DEV;
-
-    const tool = resolveRegistryAddTool({
-      localEnabled: true,
-      deployed: {
-        authorize: () => true,
-        credentials: { kind: "pat" },
-        directory: ".",
-        repository: { owner: "acme", repo: "agent" },
-        targetBranch: "main",
-      },
-    });
-
-    expect(tool).toMatchObject({
-      description: expect.stringContaining("production change proposal"),
-      inputSchema: {
-        properties: {
-          address: expect.any(Object),
-          answers: expect.any(Object),
-          installed: expect.any(Object),
-        },
-        required: ["address"],
-      },
-      outputSchema: {
-        properties: {
-          status: {
-            enum: [
-              "completed",
-              "input-required",
-              "external-action-required",
-              "failed",
-              "cancelled",
-            ],
-          },
-        },
-      },
-    });
+    expect(resolveRegistryAddTool({ localEnabled: true })).toBeNull();
   });
 });
 

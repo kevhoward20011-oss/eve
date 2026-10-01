@@ -20,7 +20,7 @@ describe("retired self-modification agent scaffold", () => {
     "resolves to null on %s regardless of options",
     async (eventName) => {
       const agent = defineSelfModificationAgent({
-        config: { deployed: { authorize: vi.fn() } },
+        config: {},
         model: "provider/model",
         reasoning: "high",
       });

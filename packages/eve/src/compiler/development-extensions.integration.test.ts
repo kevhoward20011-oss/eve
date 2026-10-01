@@ -48,7 +48,7 @@ describe("development extensions", () => {
       expect.arrayContaining(["edit_file", "search_models", "search_registry"]),
     );
     expect(subagent.agent.dynamicTools.map((tool) => tool.slug)).toEqual(
-      expect.arrayContaining(["publish", "registry_add"]),
+      expect.arrayContaining(["registry_add"]),
     );
     expect(subagent.agent.dynamicInstructions).toHaveLength(1);
 
