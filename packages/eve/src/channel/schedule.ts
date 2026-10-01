@@ -9,7 +9,7 @@ import {
   scheduleDeliveryOutputSchema,
 } from "#channel/schedule-collection-adapter.js";
 import { createSession, type Session } from "#channel/session.js";
-import { resolveCreateOnceOwner } from "#channel/channel-address.js";
+import { resolveCreateOnceOwner } from "#runtime/schedules/resolve-occurrence-owner.js";
 import type { Runtime } from "#channel/types.js";
 import { ContextContainer, contextStorage } from "#context/container.js";
 import { AuthKey, ScheduleIdKey } from "#context/keys.js";

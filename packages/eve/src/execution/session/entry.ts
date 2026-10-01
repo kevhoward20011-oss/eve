@@ -98,9 +98,6 @@ async function bootInitialOwner(
         await claimOccurrence(input.occurrenceToken);
       } catch (error) {
         if (!isHookConflictError(error)) throw error;
-        await settleContinuationConflictStep({
-          continuationToken,
-        });
         return undefined;
       }
     }

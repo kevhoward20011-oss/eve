@@ -988,7 +988,6 @@ async function receiveOnSlack(
     readonly message: string | UserContent;
     readonly target: SlackReceiveTarget;
     readonly title?: string;
-    readonly continuationToken?: string;
   },
   deps: {
     readonly from: ChannelFrom<SlackChannelState>;
@@ -1042,7 +1041,7 @@ async function receiveOnSlack(
 
   // Threadless proactive runs need distinct identities until their first
   // Slack post supplies the real thread timestamp and aliases the session.
-  const continuationThreadTs = threadTs || input.continuationToken || crypto.randomUUID();
+  const continuationThreadTs = threadTs || crypto.randomUUID();
   const audience =
     receiveTarget.audience === undefined
       ? undefined
