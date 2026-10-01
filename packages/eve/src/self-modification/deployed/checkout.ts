@@ -19,8 +19,11 @@ import {
 } from "#shared/sandbox-environment.js";
 import type { SandboxSession } from "#shared/sandbox-session.js";
 
-import { resolveActiveDeployedConfig, type SelfModificationExtensionConfig } from "../config.js";
-import type { DeployedSelfModificationConfig } from "./config-schema.js";
+import {
+  resolveActiveDeployedConfig,
+  type ResolvedSelfModificationExtensionConfig,
+} from "../config.js";
+import type { ResolvedDeployedSelfModificationConfig } from "./config-schema.js";
 import { deployedGitHubConfig } from "./github.js";
 
 const UNSUPPORTED_PROVIDER =
@@ -85,7 +88,7 @@ export async function prepareDeployedSelfModificationSandbox(
  */
 export async function initializeDeployedCheckout(
   sandbox: SandboxSession,
-  config: DeployedSelfModificationConfig,
+  config: ResolvedDeployedSelfModificationConfig,
   sessionId: string,
 ): Promise<void> {
   const repository = config.repository;
@@ -132,7 +135,7 @@ export async function initializeDeployedCheckout(
  * supported provider, it binds an inert environment and fails only when opened.
  */
 export function defineDeployedSelfModificationSandbox(
-  extensionConfig: SelfModificationExtensionConfig,
+  extensionConfig: ResolvedSelfModificationExtensionConfig,
   probes?: Pick<DefaultSandboxProbes, "isDeployedOnVercel" | "isMicrosandboxSupported">,
 ): SandboxSelector {
   const config = resolveActiveDeployedConfig(extensionConfig);

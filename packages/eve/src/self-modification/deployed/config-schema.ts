@@ -19,12 +19,18 @@ export interface DeployedSelfModificationConfig {
   readonly authorize: DeployedSelfModificationAuthorization;
   /** GitHub repository in owner/repository form. */
   readonly repository: string;
-  /** Application directory relative to the repository root. */
-  readonly directory: string;
-  /** Branch against which changes are proposed. */
-  readonly baseBranch: string;
+  /** Application directory relative to the repository root. Defaults to `"."`. */
+  readonly directory?: string;
+  /** Branch against which changes are proposed. Defaults to `"main"`. */
+  readonly baseBranch?: string;
   /** Connect-backed GitHub connector. */
   readonly github: { readonly connector: string };
+}
+
+/** Deployed configuration with defaults applied. */
+export interface ResolvedDeployedSelfModificationConfig extends DeployedSelfModificationConfig {
+  readonly directory: string;
+  readonly baseBranch: string;
 }
 
 /** GitHub user and organization names allow only alphanumerics and single hyphens. */
@@ -80,13 +86,15 @@ export const deployedSelfModificationConfigSchema = z
       .refine(
         isRepositoryRelativeDirectory,
         "Deployed self-modification directory must be a safe repository-relative path.",
-      ),
+      )
+      .default("."),
     baseBranch: z
       .string()
       .refine(
         isBranchName,
         "Deployed self-modification baseBranch must be a valid branch name, not a full Git ref.",
-      ),
+      )
+      .default("main"),
     github: z.object({ connector: z.string().min(1) }).strict(),
   })
   .strict();

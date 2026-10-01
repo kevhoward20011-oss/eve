@@ -21,6 +21,15 @@ describe("deployed self-modification configuration", () => {
     expect(validate(config).issues).toBeUndefined();
   });
 
+  it("defaults the directory to the repository root and the base branch to main", () => {
+    const { authorize, github, repository } = deployed;
+    const result = validate({ authorize, github, repository });
+    expect(result.issues).toBeUndefined();
+    expect(result).toMatchObject({
+      value: { deployed: { baseBranch: "main", directory: ".", repository } },
+    });
+  });
+
   it.each([
     ["repository", { ...deployed, repository: "github.com/acme/agents" }, "owner/repo"],
     ["repository owner", { ...deployed, repository: "-acme/agents" }, "owner/repo"],

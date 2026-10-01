@@ -110,8 +110,8 @@ resolver returns `null` outside its mode, so the root agent sees at most one:
 namespace collision with the bundled development extension, and the TUI and setup
 keep their fixed mount path.
 
-Require an authorization callback, repository, directory (`"."` for the root),
-base branch, and connector. Validate GitHub identifiers and safe relative paths.
+Require an authorization callback, repository, and connector; `directory`
+defaults to `"."` and `baseBranch` to `"main"`. Validate GitHub identifiers and safe relative paths.
 Configure the connector's installation for only this repository; the
 `repository` field does not constrain eve-code's `gh` credential requests.
 
