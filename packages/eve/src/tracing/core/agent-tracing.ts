@@ -1,6 +1,6 @@
 import {
-  createScopeRuntime,
-  type ScopePersistence,
+  createTraceLifecycle,
+  type TraceCheckpointer,
   type TurnScope,
   type TurnMetadata,
 } from "#tracing/core/scopes.js";
@@ -28,12 +28,13 @@ export function createAgentTracing(input: {
   readonly framework: FrameworkIdentity;
   readonly backend: TraceBackend;
   readonly serializer: ContentSerializer;
-  readonly persistence?: ScopePersistence;
+  readonly checkpointer?: TraceCheckpointer;
   readonly content?: { readonly recordInputs: boolean; readonly recordOutputs: boolean };
   readonly diagnostic?: (code: string) => void;
 }) {
-  const runtime = createScopeRuntime(input);
+  const runtime = createTraceLifecycle(input);
   return {
+    lifecycle: runtime,
     async turn<T>(turn: TurnInput, execute: (scope: TurnScope) => Promise<T>): Promise<T> {
       const links: TraceLink[] = [];
       if (turn.sequence === 0 && turn.caller !== undefined)
@@ -55,8 +56,9 @@ export function createAgentTracing(input: {
         { key: `${turn.runId}:${turn.turnId}`, links },
       );
       try {
+        await scope.started();
         const result = await scope.run(() => execute(scope.authoring as TurnScope));
-        await scope.finish({ outcome: turn.signal?.aborted ? "cancelled" : "completed" });
+        await scope.completed({ outcome: turn.signal?.aborted ? "cancelled" : "completed" });
         return result;
       } catch (error) {
         await scope.finish({

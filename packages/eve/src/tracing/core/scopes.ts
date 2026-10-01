@@ -41,6 +41,8 @@ import {
   completeScope,
   capturedScopeData as capturedData,
 } from "#tracing/core/scope-completion.js";
+import { topologyScope } from "#tracing/core/topology.js";
+export { scopeRuntime } from "#tracing/core/topology.js";
 
 export interface ScopeIdentity extends RunIdentity {
   readonly agentName?: string;
@@ -164,7 +166,7 @@ export interface ScopeRecord {
   readonly stepIndex?: number;
 }
 
-export interface ScopePersistence {
+export interface TraceCheckpointer {
   load(key: string): Promise<ScopeRecord | undefined>;
   save(record: ScopeRecord): Promise<void>;
   remove(key: string): Promise<void>;
@@ -187,25 +189,22 @@ export interface RuntimeScope {
   memory(options: MemoryOptions, binding?: RuntimeBinding): Promise<RuntimeScope>;
   run<T>(execute: () => T): T;
   finish(result?: ScopeTerminal): Promise<void>;
+  started(): Promise<void>;
+  completed(result?: ScopeTerminal): Promise<void>;
+  failed(error: unknown): Promise<void>;
   abandon(): void;
   usage(usage: Usage): Promise<void>;
   nextStep(): number;
   modelSelected(modelId: string, provider: string): void;
   error(error?: unknown, errorType?: string): void;
   cost(cost: ScopeCost): void;
+  annotate(attributes: Attributes): void;
 }
 
-const authoringRuntimes = new WeakMap<object, RuntimeScope>();
-export function scopeRuntime(scope: TurnScope | StepScope | ActionScope): RuntimeScope {
-  const runtime = authoringRuntimes.get(scope);
-  if (runtime === undefined) throw new Error("The scope belongs to another tracing runtime.");
-  return runtime;
-}
-
-export function createScopeRuntime(input: {
+export function createTraceLifecycle(input: {
   readonly backend: TraceBackend;
   readonly serializer: ContentSerializer;
-  readonly persistence?: ScopePersistence;
+  readonly checkpointer?: TraceCheckpointer;
   readonly diagnostic?: (code: string) => void;
   readonly mapIdentity?: (identity: ScopeIdentity) => Attributes;
 }) {
@@ -222,7 +221,7 @@ export function createScopeRuntime(input: {
     binding?: RuntimeBinding,
   ): Promise<RuntimeScope> {
     const key = binding?.key ?? `${identity.runId}:${identity.turnId}:${counter++}`;
-    const saved = input.persistence === undefined ? undefined : await input.persistence.load(key);
+    const saved = input.checkpointer === undefined ? undefined : await input.checkpointer.load(key);
     if (
       saved !== undefined &&
       (saved.identity.runId !== identity.runId ||
@@ -256,6 +255,7 @@ export function createScopeRuntime(input: {
       startTimeMs,
       links,
     );
+    prepared = { ...prepared, outputContext: binding?.outputContext };
     if (actualData.type === "activation" && binding?.content !== undefined) {
       prepared = {
         ...prepared,
@@ -267,11 +267,11 @@ export function createScopeRuntime(input: {
       };
     }
     const durable = input.backend as Partial<DurableTraceBackend>;
-    const deferred = binding?.deferred === true || input.persistence !== undefined;
+    const deferred = binding?.deferred === true || input.checkpointer !== undefined;
     let reference = saved?.reference ?? binding?.reference;
     if (deferred && reference === undefined) {
       if (durable.reserveActivation === undefined || durable.reserveChild === undefined)
-        throw new Error("Persisted trace scopes require reserved-ID backend support.");
+        throw new Error("Checkpointed trace scopes require reserved-ID backend support.");
       reference =
         data.type === "activation"
           ? durable.reserveActivation({ key, span: prepared, capture: actualCapture })
@@ -282,8 +282,8 @@ export function createScopeRuntime(input: {
     let operation: TraceOperation | undefined = deferred
       ? undefined
       : reference === undefined
-        ? engine.start(prepared, actualCapture)
-        : engine.startReserved(prepared, reference, actualCapture);
+        ? engine.start(prepared, actualCapture, binding?.executionContext)
+        : engine.startReserved(prepared, reference, actualCapture, binding?.executionContext);
     reference ??= operation?.reference;
     if (reference === undefined)
       throw new Error("A child trace scope requires its constructed parent.");
@@ -299,16 +299,17 @@ export function createScopeRuntime(input: {
       startTimeMs,
       links,
     };
-    if (input.persistence !== undefined && saved === undefined)
-      await input.persistence.save(record);
+    if (input.checkpointer !== undefined && saved === undefined)
+      await input.checkpointer.save(record);
     let finished = false;
+    let started = false;
     const children = new Set<RuntimeScope>();
     let totalInput = saved?.usage?.inputTokens;
     let totalOutput = saved?.usage?.outputTokens;
     let stepIndex = saved?.stepIndex ?? 0;
     let childIndex = saved?.childIndex ?? 0;
     let pendingError: { error?: unknown; errorType?: string } | undefined;
-    const authoring = {} as TurnScope & StepScope & ActionScope;
+    let authoring: TurnScope | StepScope | ActionScope;
     function requireParent(types: readonly ScopeData["type"][]): void {
       if (finished || !types.includes(actualData.type))
         throw new Error("The operation is not permitted in this trace scope.");
@@ -334,33 +335,21 @@ export function createScopeRuntime(input: {
         nextAttempt,
         childBinding ?? { key: `${key}:${childData.type}:${childIndex++}` },
       );
-      if (input.persistence !== undefined) {
+      if (input.checkpointer !== undefined) {
         record = { ...record!, childIndex, stepIndex };
-        await input.persistence.save(record);
+        await input.checkpointer.save(record);
       }
       if (childData.type === "model")
         runtime.modelSelected(childData.options.modelId, childData.options.provider);
       children.add(next);
       return next;
     }
-    async function callback<T>(
-      next: RuntimeScope,
-      execute: () => Promise<T>,
-      result?: (value: T) => ScopeTerminal,
-    ): Promise<T> {
-      try {
-        const value = await next.run(execute);
-        await next.finish(result?.(value) ?? { output: value });
-        return value;
-      } catch (error) {
-        await next.finish({ failed: true, error, outcome: "failed" });
-        throw error;
-      }
-    }
     const runtime: RuntimeScope = {
       type: actualData.type,
       reference: retainedReference,
-      authoring,
+      get authoring() {
+        return authoring;
+      },
       capture: actualCapture,
       get finished() {
         return finished;
@@ -416,10 +405,15 @@ export function createScopeRuntime(input: {
         if (operation !== undefined) return operation.run(execute);
         let entered = false;
         try {
-          return input.backend.run(retainedReference, actualCapture, () => {
-            entered = true;
-            return execute();
-          });
+          return input.backend.run(
+            retainedReference,
+            actualCapture,
+            () => {
+              entered = true;
+              return execute();
+            },
+            binding?.executionContext,
+          );
         } catch (error) {
           if (entered) throw error;
           return execute();
@@ -432,7 +426,12 @@ export function createScopeRuntime(input: {
         for (const next of children)
           if (!next.finished && !deferred)
             await next.finish({ failed: result.failed, error: result.error, outcome: "abandoned" });
-        operation ??= engine.startReserved(prepared, retainedReference, actualCapture);
+        operation ??= engine.startReserved(
+          prepared,
+          retainedReference,
+          actualCapture,
+          binding?.executionContext,
+        );
         const terminal =
           actualData.type === "activation" && result.usage === undefined
             ? { ...result, usage: { inputTokens: totalInput, outputTokens: totalOutput } }
@@ -449,7 +448,19 @@ export function createScopeRuntime(input: {
         if (actualData.type === "model" && result.model !== undefined)
           await parent?.usage(result.model.usage);
         operation.end(result.endTimeMs);
-        if (input.persistence !== undefined) await input.persistence.remove(key);
+        if (input.checkpointer !== undefined) await input.checkpointer.remove(key);
+      },
+      async started() {
+        if (finished || started) return;
+        started = true;
+        if (operation !== undefined && actualData.type === "step")
+          operation.addEvent("step.started", undefined, startTimeMs);
+      },
+      completed(result = {}) {
+        return runtime.finish({ ...result, failed: false });
+      },
+      failed(error) {
+        return runtime.finish({ failed: true, error, outcome: "failed" });
       },
       abandon() {
         if (finished) return;
@@ -460,9 +471,9 @@ export function createScopeRuntime(input: {
         if (operation !== undefined) applyAttributes(operation, usageAttributes(usage));
         if (usage.inputTokens !== undefined) totalInput = (totalInput ?? 0) + usage.inputTokens;
         if (usage.outputTokens !== undefined) totalOutput = (totalOutput ?? 0) + usage.outputTokens;
-        if (input.persistence !== undefined) {
+        if (input.checkpointer !== undefined) {
           record = { ...record!, usage: { inputTokens: totalInput, outputTokens: totalOutput } };
-          await input.persistence.save(record);
+          await input.checkpointer.save(record);
         }
         await parent?.usage(usage);
       },
@@ -479,51 +490,16 @@ export function createScopeRuntime(input: {
       cost(cost) {
         if (operation !== undefined) applyAttributes(operation, gatewayCostAttributes(cost));
       },
+      annotate(attributes) {
+        if (operation !== undefined) applyAttributes(operation, attributes);
+      },
       error(error, errorType) {
         pendingError = { error: actualCapture.recordOutputs ? error : undefined, errorType };
         if (operation !== undefined) operation.fail(pendingError.error, errorType);
       },
     };
-    authoring.step = async (options, execute) => {
-      const next = await runtime.step(options);
-      return callback(next, () => execute(next.authoring as StepScope));
-    };
-    authoring.model = async (options, execute, result) => {
-      const next = await runtime.model(options);
-      return callback(next, execute, (value) =>
-        result === undefined ? {} : { model: result(value) },
-      );
-    };
-    authoring.action = async (options, execute) => {
-      const next = await runtime.action(options);
-      return callback(next, () => execute(next.authoring as ActionScope));
-    };
-    authoring.tool = async (execute) => callback(await runtime.tool(), execute);
-    authoring.approval = async (options, execute, outcome) =>
-      callback(await runtime.approval(options), execute, (response) => ({
-        outcome: outcome?.(response) ?? "approved",
-        response,
-      }));
-    authoring.memory = async (options, execute) => {
-      const next = await runtime.memory(options);
-      const result = await callback(next, execute, (value) => ({
-        recordCount: value.recordCount,
-        records: value.records,
-      }));
-      return result.value;
-    };
-    authoringRuntimes.set(authoring, runtime);
-    if (actualData.type !== "activation") delete (authoring as Partial<TurnScope>).step;
-    if (actualData.type !== "step") {
-      delete (authoring as Partial<StepScope>).model;
-      delete (authoring as Partial<StepScope>).action;
-    }
-    if (actualData.type !== "action") {
-      delete (authoring as Partial<ActionScope>).tool;
-      delete (authoring as Partial<ActionScope>).approval;
-    }
-    if (operation !== undefined && actualData.type === "step")
-      operation.addEvent("step.started", undefined, startTimeMs);
+    authoring = topologyScope(runtime);
+    await runtime.started();
     return runtime;
   }
 
@@ -686,9 +662,9 @@ export function createScopeRuntime(input: {
       return construct(identity, capture, data, undefined, attempt, binding);
     },
     async restore(key: string, capture: CaptureDecision): Promise<RuntimeScope | undefined> {
-      if (input.persistence === undefined)
-        throw new Error("Scope restoration requires runtime persistence.");
-      const record = await input.persistence.load(key);
+      if (input.checkpointer === undefined)
+        throw new Error("Scope restoration requires a runtime checkpointer.");
+      const record = await input.checkpointer.load(key);
       if (record === undefined) return undefined;
       return construct(record.identity, capture, record.data, undefined, record.attempt, {
         key,

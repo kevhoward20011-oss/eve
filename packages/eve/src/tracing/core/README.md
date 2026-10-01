@@ -5,6 +5,11 @@ attributes, parent relationships, content projection, and terminal events.
 The application supplies semantic data and callbacks, not OTel attributes.
 These modules are not public package exports.
 
+`tracing.lifecycle` is the lower-level API. Construct a turn, then its children,
+and report `started()`, `completed()`, or `failed()`. The callback DSL delegates
+to those same lifecycle operations. SDK and eve event bindings use lifecycle
+directly. The backend carries opaque host context without exposing raw spans.
+
 ## Callback DSL
 
 Install an OTel provider and async context manager first. The library does not
@@ -64,7 +69,7 @@ Do not install a second integration that records the same model or tool spans.
 
 ## Runtime persistence
 
-Configure `persistence` once with a `ScopePersistence` adapter. The library saves
+Configure `checkpointer` once with a `TraceCheckpointer` adapter. The lifecycle saves
 serializable scope state through `load`, `save`, and `remove`. The adapter joins
 that state to the runtime's existing checkpoint. It does not create a separate
 workflow checkpoint.

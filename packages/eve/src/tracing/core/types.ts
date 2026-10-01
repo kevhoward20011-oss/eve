@@ -16,7 +16,10 @@ export type SpanType =
   | "memory"
   | "channelRequest"
   | "mcp";
-export type SpanKind = "INTERNAL" | "CLIENT" | "SERVER";
+export type SpanKind = "INTERNAL" | "CLIENT" | "SERVER" | "PRODUCER" | "CONSUMER";
+
+/** Host-owned process-local context. Never stored in a checkpoint. */
+export type ExecutionContext = object;
 
 export interface TraceReference {
   readonly traceId: string;
@@ -46,6 +49,7 @@ export interface PreparedSpan {
   readonly root?: boolean;
   readonly startTimeMs?: number;
   readonly links?: readonly TraceLink[];
+  readonly outputContext?: Readonly<Record<string, string>>;
 }
 
 export interface SpanWriter {
@@ -58,8 +62,13 @@ export interface SpanWriter {
 }
 
 export interface TraceBackend {
-  start(span: PreparedSpan): SpanWriter;
-  run<T>(reference: TraceReference, capture: CaptureDecision, execute: () => T): T;
+  start(span: PreparedSpan, executionContext?: ExecutionContext): SpanWriter;
+  run<T>(
+    reference: TraceReference,
+    capture: CaptureDecision,
+    execute: () => T,
+    executionContext?: ExecutionContext,
+  ): T;
   current(): TraceReference | undefined;
 }
 
@@ -70,12 +79,17 @@ export interface DurableTraceBackend extends TraceBackend {
     capture: CaptureDecision;
   }): TraceReference;
   reserveChild(parent: TraceReference, key: string): TraceReference;
-  startReserved(span: PreparedSpan, reference: TraceReference): SpanWriter;
+  startReserved(
+    span: PreparedSpan,
+    reference: TraceReference,
+    executionContext?: ExecutionContext,
+  ): SpanWriter;
 }
 
 export interface MappingContext {
   readonly type: SpanType;
   readonly operationId: string;
+  readonly outputContext?: Readonly<Record<string, string>>;
 }
 
 export interface OutputMapping {

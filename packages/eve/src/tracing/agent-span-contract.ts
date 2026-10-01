@@ -4,7 +4,7 @@ export {
   invocationName as agentInvocationSpanName,
   modelName as modelSpanName,
 } from "#tracing/core/contract.js";
-export const AGENT_TRACE_SCHEMA_VERSION = 4;
+export { EVE_TRACE_SCHEMA_VERSION as AGENT_TRACE_SCHEMA_VERSION } from "#tracing/core/profiles/eve.js";
 
 export interface AgentSamplingOperation {
   readonly name: string;

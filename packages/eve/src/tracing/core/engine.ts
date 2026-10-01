@@ -6,6 +6,7 @@ import type {
   SpanWriter,
   TraceBackend,
   TraceReference,
+  ExecutionContext,
 } from "#tracing/core/types.js";
 import { withoutDeclinedContent } from "#tracing/content-attributes.js";
 
@@ -32,7 +33,11 @@ export function createTraceEngine(input: {
       return undefined;
     }
   }
-  function wrap(writer: SpanWriter | undefined, capture: CaptureDecision): TraceOperation {
+  function wrap(
+    writer: SpanWriter | undefined,
+    capture: CaptureDecision,
+    executionContext?: ExecutionContext,
+  ): TraceOperation {
     let finished = false;
     const reference = writer?.reference ?? {
       traceId: "0".repeat(32),
@@ -74,10 +79,15 @@ export function createTraceEngine(input: {
         if (finished) return execute();
         let entered = false;
         try {
-          return input.backend.run(reference, capture, () => {
-            entered = true;
-            return execute();
-          });
+          return input.backend.run(
+            reference,
+            capture,
+            () => {
+              entered = true;
+              return execute();
+            },
+            executionContext,
+          );
         } catch (error) {
           if (entered) throw error;
           report();
@@ -87,18 +97,26 @@ export function createTraceEngine(input: {
     };
   }
   return {
-    start(span: PreparedSpan, capture: CaptureDecision): TraceOperation {
+    start(
+      span: PreparedSpan,
+      capture: CaptureDecision,
+      executionContext?: ExecutionContext,
+    ): TraceOperation {
       const attributes = (withoutDeclinedContent(span.attributes, capture) ??
         span.attributes) as Attributes;
       return wrap(
-        capture.emit ? safely(() => input.backend.start({ ...span, attributes })) : undefined,
+        capture.emit
+          ? safely(() => input.backend.start({ ...span, attributes }, executionContext))
+          : undefined,
         capture,
+        executionContext,
       );
     },
     startReserved(
       span: PreparedSpan,
       reference: TraceReference,
       capture: CaptureDecision,
+      executionContext?: ExecutionContext,
     ): TraceOperation {
       const backend = input.backend as Partial<DurableTraceBackend>;
       if (backend.startReserved === undefined)
@@ -107,9 +125,12 @@ export function createTraceEngine(input: {
         span.attributes) as Attributes;
       return wrap(
         capture.emit
-          ? safely(() => backend.startReserved!({ ...span, attributes }, reference))
+          ? safely(() =>
+              backend.startReserved!({ ...span, attributes }, reference, executionContext),
+            )
           : undefined,
         capture,
+        executionContext,
       );
     },
     annotate(operation: TraceOperation, attributes: Attributes): void {

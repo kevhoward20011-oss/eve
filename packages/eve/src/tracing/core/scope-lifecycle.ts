@@ -1,4 +1,4 @@
-import type { TraceReference, TraceLink, Usage } from "#tracing/core/types.js";
+import type { ExecutionContext, TraceReference, TraceLink, Usage } from "#tracing/core/types.js";
 import type { ModelResult } from "#tracing/core/scopes.js";
 
 export interface ScopeCost {
@@ -17,6 +17,8 @@ export interface RuntimeBinding {
   readonly deferred?: boolean;
   readonly parent?: TraceReference;
   readonly content?: { readonly recordInputs: boolean; readonly recordOutputs: boolean };
+  readonly executionContext?: ExecutionContext;
+  readonly outputContext?: Readonly<Record<string, string>>;
 }
 
 export interface ScopeTerminal {

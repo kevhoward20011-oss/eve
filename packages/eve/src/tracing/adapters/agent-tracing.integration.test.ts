@@ -17,6 +17,7 @@ import { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { createTraceEngine } from "#tracing/core/engine.js";
 import { createDurableTraceDriver, type DurableSpanRecord } from "#tracing/core/durable.js";
 import { createTransportTracing } from "#tracing/adapters/transports.js";
+import { ROOT_CONTEXT, createContextKey } from "@opentelemetry/api";
 
 const usage = {
   inputTokens: { cacheRead: 0, cacheWrite: 0, noCache: 3, total: 3 },
@@ -55,6 +56,50 @@ function setup(mapping = false) {
 }
 
 describe("standalone agent tracing", () => {
+  it("preserves explicit host context at span start and activation without a tracer wrapper", async () => {
+    const key = createContextKey("host-audience");
+    const host = ROOT_CONTEXT.setValue(key, "private");
+    const exporter = new InMemorySpanExporter();
+    let audience: unknown;
+    const provider = new BasicTracerProvider({
+      spanProcessors: [
+        {
+          onStart(_span, parent) {
+            audience = parent.getValue(key);
+          },
+          onEnd() {},
+          async forceFlush() {},
+          async shutdown() {},
+        },
+        new SimpleSpanProcessor(exporter),
+      ],
+    });
+    providers.push(provider);
+    const manager = new AsyncLocalStorageContextManager().enable();
+    context.setGlobalContextManager(manager);
+    try {
+      const operation = createTraceEngine({
+        backend: liveOtelBackend(provider.getTracer("host")),
+      }).start(
+        {
+          type: "channelRequest",
+          operationId: "request",
+          name: "agent.channel.request",
+          kind: "SERVER",
+          attributes: {},
+        },
+        { emit: true, recordInputs: false, recordOutputs: false },
+        host,
+      );
+      expect(audience).toBe("private");
+      operation.run(() => expect(context.active().getValue(key)).toBe("private"));
+      operation.end();
+      expect(exporter.getFinishedSpans()).toHaveLength(1);
+    } finally {
+      context.disable();
+      manager.disable();
+    }
+  });
   it("records an SDK tool loop with isolated async parents and no content by default", async () => {
     const manager = new AsyncLocalStorageContextManager().enable();
     context.setGlobalContextManager(manager);

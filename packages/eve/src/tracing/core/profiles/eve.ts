@@ -1,5 +1,7 @@
 import type { Attributes, MappingContext, OutputMapping } from "#tracing/core/types.js";
 
+export const EVE_TRACE_SCHEMA_VERSION = 4;
+
 export function eveOutputMapping(options?: {
   readonly resolve: (span: MappingContext) => {
     readonly traceSessionId?: string;
@@ -10,7 +12,7 @@ export function eveOutputMapping(options?: {
     attributes(span, attributes) {
       const output: Record<string, Attributes[string]> = {};
       for (const [key, value] of Object.entries(attributes)) {
-        if (key === "agent.trace.schema.version") output[key] = 4;
+        if (key === "agent.trace.schema.version") output[key] = EVE_TRACE_SCHEMA_VERSION;
         else if (key === "agent.connection.name") output["eve.connection.name"] = value;
         else if (span.type === "channelRequest" && key === "agent.channel.name")
           output["eve.channel.name"] = value;
@@ -19,7 +21,7 @@ export function eveOutputMapping(options?: {
         else output[key] = value;
       }
       if (attributes["agent.run.id"] !== undefined) {
-        const context = options?.resolve(span);
+        const context = options?.resolve(span) ?? span.outputContext;
         if (context?.platform === "vercel" && context.traceSessionId !== undefined)
           output["vercel.session_id"] = context.traceSessionId;
       }

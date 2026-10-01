@@ -6,7 +6,9 @@ import type {
   Usage,
 } from "#tracing/core/types.js";
 
-export function identityAttributes(identity: RunIdentity): Attributes {
+export function identityAttributes(
+  identity: Pick<RunIdentity, "runId" | "conversationId">,
+): Attributes {
   return {
     "agent.run.id": identity.runId,
     "agent.trace.schema.version": 1,
@@ -69,6 +71,7 @@ export function runtimeContextAttributes(
         if (remaining <= 0) break;
         visit(`${key}.${keyPart}`, Reflect.get(value, keyPart), depth + 1);
       }
+      seen.delete(value);
     }
   }
   if (input !== undefined) visit("ai.settings.context", input, 0);

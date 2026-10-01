@@ -19,13 +19,13 @@ import type {
   SpanWriter,
   TraceBackend,
   TraceReference,
+  ExecutionContext,
 } from "#tracing/core/types.js";
 import { linkAttributes } from "#tracing/core/links.js";
 
-function parentContext(reference: TraceReference | undefined): Context {
-  return reference === undefined
-    ? ROOT_CONTEXT
-    : trace.setSpan(ROOT_CONTEXT, trace.wrapSpanContext(reference));
+function parentContext(reference: TraceReference | undefined, host?: ExecutionContext): Context {
+  const base = (host as Context | undefined) ?? ROOT_CONTEXT;
+  return reference === undefined ? base : trace.setSpan(base, trace.wrapSpanContext(reference));
 }
 
 function mappedAttributes(
@@ -37,7 +37,7 @@ function mappedAttributes(
 }
 
 export function liveOtelBackend(tracer: Tracer, mapping?: OutputMapping): TraceBackend {
-  function start(span: PreparedSpan): SpanWriter {
+  function start(span: PreparedSpan, executionContext?: ExecutionContext): SpanWriter {
     const recorded = tracer.startSpan(
       mapping?.name?.(span, span.name) ?? span.name,
       {
@@ -47,7 +47,7 @@ export function liveOtelBackend(tracer: Tracer, mapping?: OutputMapping): TraceB
         startTime: span.startTimeMs,
         links: span.links?.map((link) => mapping?.link(span, link) ?? linkAttributes(link)),
       },
-      parentContext(span.root ? undefined : span.parent),
+      parentContext(span.root ? undefined : span.parent, executionContext),
     );
     return {
       reference: recorded.spanContext(),
@@ -73,9 +73,12 @@ export function liveOtelBackend(tracer: Tracer, mapping?: OutputMapping): TraceB
   return {
     start,
     current: () => trace.getSpan(context.active())?.spanContext(),
-    run(reference, capture, execute) {
+    run(reference, capture, execute, executionContext) {
       // Retain baggage and host context while replacing the semantic parent span.
-      let active = trace.setSpan(context.active(), trace.wrapSpanContext(reference));
+      let active = trace.setSpan(
+        (executionContext as Context | undefined) ?? context.active(),
+        trace.wrapSpanContext(reference),
+      );
       active = withErrorContent(active, capture.recordOutputs);
       if (!capture.emit || (reference.traceFlags & 1) === 0) active = suppressTracing(active);
       return context.with(active, execute);
@@ -115,9 +118,9 @@ export function durableOtelBackend(input: {
       spanId: input.idGenerator.deriveSpanId(key),
       isRemote: false,
     }),
-    startReserved(span, reference) {
+    startReserved(span, reference, executionContext) {
       const writer = input.idGenerator.withTraceId(reference.traceId, () =>
-        input.idGenerator.withSpanId(reference.spanId, () => live.start(span)),
+        input.idGenerator.withSpanId(reference.spanId, () => live.start(span, executionContext)),
       );
       if (
         writer.reference.spanId !== reference.spanId ||

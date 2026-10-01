@@ -6,8 +6,8 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { createAgentTracing } from "#tracing/core/agent-tracing.js";
 import {
-  createScopeRuntime,
-  type ScopePersistence,
+  createTraceLifecycle,
+  type TraceCheckpointer,
   type ScopeRecord,
 } from "#tracing/core/scopes.js";
 import { durableOtelBackend, liveOtelBackend } from "#tracing/adapters/otel.js";
@@ -70,6 +70,50 @@ describe("constructed agent trace scopes", () => {
     }
   });
 
+  it("exposes lifecycle beneath the DSL and starts and settles operations once", async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    try {
+      const tracing = createAgentTracing({
+        backend: liveOtelBackend(provider.getTracer("lifecycle")),
+        agentName: "support",
+        framework: { name: "custom", version: "1" },
+        serializer: aiSdkContentSerializer,
+      });
+      const turn = await tracing.lifecycle.turn(
+        {
+          conversationId: "conversation",
+          runId: "run",
+          turnId: "turn",
+          agentName: "support",
+          framework: { name: "custom", version: "1" },
+        },
+        { sequence: 0 },
+        { emit: true, recordInputs: false, recordOutputs: false },
+      );
+      const step = await turn.step({ index: 0 });
+      await step.started();
+      await step.started();
+      const action = await step.action({ callId: "call", name: "lookup" });
+      const tool = await action.tool();
+      await tool.completed({ output: "private" });
+      await tool.completed({ output: "duplicate" });
+      await action.completed();
+      await step.completed();
+      await turn.completed();
+      const spans = exporter.getFinishedSpans();
+      expect(spans.filter((span) => span.name === "execute_tool lookup")).toHaveLength(1);
+      expect(
+        spans.find((span) => span.name === "agent.step")!.events.map((event) => event.name),
+      ).toEqual(["step.started", "step.completed"]);
+      expect(JSON.stringify(spans.map((span) => span.attributes))).not.toContain("private");
+    } finally {
+      await provider.shutdown();
+    }
+  });
+
   it("restores a suspended action in a new runtime without replaying callbacks or broadening capture", async () => {
     const exporter = new InMemorySpanExporter();
     const idGenerator = new AgentSpanIdGenerator();
@@ -78,7 +122,7 @@ describe("constructed agent trace scopes", () => {
       spanProcessors: [new SimpleSpanProcessor(exporter)],
     });
     const records = new Map<string, ScopeRecord>();
-    const persistence: ScopePersistence = {
+    const checkpointer: TraceCheckpointer = {
       load: async (key) => records.get(key),
       save: async (record) => {
         records.set(record.key, JSON.parse(JSON.stringify(record)) as ScopeRecord);
@@ -93,8 +137,8 @@ describe("constructed agent trace scopes", () => {
         idGenerator,
         samplesTrace: () => true,
       });
-      const options = { backend, serializer: aiSdkContentSerializer, persistence };
-      const before = createScopeRuntime(options);
+      const options = { backend, serializer: aiSdkContentSerializer, checkpointer };
+      const before = createTraceLifecycle(options);
       const capture = { emit: true, recordInputs: false, recordOutputs: false };
       const turn = await before.turn(
         {
@@ -120,7 +164,7 @@ describe("constructed agent trace scopes", () => {
       const original = action.reference;
       expect(exporter.getFinishedSpans()).toHaveLength(0);
       expect(JSON.stringify([...records.values()])).not.toContain("secret input");
-      const after = createScopeRuntime(options);
+      const after = createTraceLifecycle(options);
       const restored = await after.restore("action", {
         emit: true,
         recordInputs: true,
