@@ -28,11 +28,8 @@ export function eveOutputMapping(options?: {
       return output;
     },
     link: (_span, link) => ({
-      context: link.context,
-      attributes: {
-        "eve.link.type":
-          link.relationship === "execution.delivery" ? "workflow.delivery" : link.relationship,
-      },
+      "eve.link.type":
+        link.relationship === "execution.delivery" ? "workflow.delivery" : link.relationship,
     }),
   };
 }

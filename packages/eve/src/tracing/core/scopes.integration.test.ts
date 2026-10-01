@@ -16,6 +16,103 @@ import { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { eveOutputMapping } from "#tracing/core/profiles/eve.js";
 
 describe("constructed agent trace scopes", () => {
+  it("omits checkpoint content when the root sampler declines emission", async () => {
+    const provider = new BasicTracerProvider({ idGenerator: new AgentSpanIdGenerator() });
+    const records = new Map<string, ScopeRecord>();
+    const idGenerator = new AgentSpanIdGenerator();
+    try {
+      const tracing = createAgentTracing({
+        adapter: {
+          backend: durableOtelBackend({
+            tracer: provider.getTracer("unsampled"),
+            idGenerator,
+            samplesTrace: () => false,
+          }),
+          serializer: aiSdkContentSerializer,
+        },
+        checkpointer: {
+          load: async (key) => records.get(key),
+          save: async (record) => {
+            records.set(record.key, record);
+          },
+          remove: async (key) => {
+            records.delete(key);
+          },
+        },
+      });
+      const turn = await tracing.lifecycle.turn(
+        {
+          conversationId: "conversation",
+          runId: "run",
+          turnId: "turn",
+          framework: { name: "custom", version: "1" },
+        },
+        { sequence: 0, title: "secret title" },
+        { emit: true, recordInputs: true, recordOutputs: true },
+        { key: "turn" },
+      );
+      await (
+        await turn.step({ index: 0 })
+      ).action({ callId: "call", name: "lookup", arguments: "secret input" });
+      expect(JSON.stringify([...records.values()])).not.toContain("secret");
+      expect(
+        [...records.values()].every(
+          (record) =>
+            !record.capture.emit && !record.capture.recordInputs && !record.capture.recordOutputs,
+        ),
+      ).toBe(true);
+    } finally {
+      await provider.shutdown();
+    }
+  });
+
+  it("keeps error classes without exception details through callback and MCP lifecycles", async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    try {
+      const tracing = createAgentTracing({
+        adapter: {
+          backend: liveOtelBackend(provider.getTracer("errors")),
+          serializer: aiSdkContentSerializer,
+        },
+      });
+      await expect(
+        tracing.turn(
+          { conversationId: "conversation", runId: "run", turnId: "turn", sequence: 0 },
+          async (turn) => {
+            await turn.step({ index: 0 }, async (step) => {
+              await step.model({ provider: "provider", modelId: "model" }, async () => {
+                throw new TypeError("secret");
+              });
+            });
+          },
+        ),
+      ).rejects.toThrow("secret");
+      const mcp = tracing.lifecycle.mcp({
+        method: "tools/list",
+        connectionName: "catalog",
+        capture: { emit: true, recordInputs: false, recordOutputs: false },
+      });
+      mcp.failed(new RangeError("secret"));
+      const spans = exporter.getFinishedSpans();
+      expect(spans.find((span) => span.name === "chat model")?.attributes["error.type"]).toBe(
+        "TypeError",
+      );
+      expect(spans.find((span) => span.name === "tools/list")?.attributes["error.type"]).toBe(
+        "RangeError",
+      );
+      expect(spans.every((span) => span.events.every((event) => event.name !== "exception"))).toBe(
+        true,
+      );
+      expect(
+        JSON.stringify(spans.map((span) => ({ attributes: span.attributes, status: span.status }))),
+      ).not.toContain("secret");
+    } finally {
+      await provider.shutdown();
+    }
+  });
   it("constructs a complete callback topology without exposing spans or persistence", async () => {
     const exporter = new InMemorySpanExporter();
     const provider = new BasicTracerProvider({
@@ -233,8 +330,18 @@ describe("constructed agent trace scopes", () => {
         },
         data: { type: "step", options: { index: 0 } },
         capture: { emit: true, recordInputs: false, recordOutputs: false },
-        reference: { traceId: "1".repeat(32), spanId: "2".repeat(16), traceFlags: 1 },
-        parent: { traceId: "1".repeat(32), spanId: "3".repeat(16), traceFlags: 1 },
+        reference: {
+          traceId: "1".repeat(32),
+          spanId: "2".repeat(16),
+          traceFlags: 1,
+          tracestate: "vendor=state",
+        },
+        parent: {
+          traceId: "1".repeat(32),
+          spanId: "3".repeat(16),
+          traceFlags: 1,
+          tracestate: "vendor=parent",
+        },
         startTimeMs: Date.now(),
         outputContext: { platform: "vercel", traceSessionId: "remote-session" },
       };
@@ -249,6 +356,16 @@ describe("constructed agent trace scopes", () => {
       expect(spans.find((span) => span.name === "chat model")!.parentSpanContext?.spanId).toBe(
         record.reference.spanId,
       );
+      expect(
+        spans
+          .find((span) => span.name === "chat model")!
+          .parentSpanContext?.traceState?.serialize(),
+      ).toBe("vendor=state");
+      expect(
+        spans
+          .find((span) => span.name === "agent.step")!
+          .parentSpanContext?.traceState?.serialize(),
+      ).toBe("vendor=parent");
       expect(spans.find((span) => span.name === "agent.step")!.spanContext().spanId).toBe(
         record.reference.spanId,
       );

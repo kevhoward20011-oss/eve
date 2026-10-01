@@ -1,7 +1,27 @@
 import type { ExecutionContext, TraceReference, TraceLink, Usage } from "#tracing/core/types.js";
 import type { ModelResult, ScopeRecord } from "#tracing/core/scopes.js";
 import type { ActionKind } from "#tracing/core/types.js";
-import type { ChannelMetadata } from "#tracing/core/contract.js";
+import type { ChannelMetadata, PrincipalMetadata } from "#tracing/core/contract.js";
+
+export interface TurnMetadata {
+  readonly sequence: number;
+  readonly subagent?: boolean;
+  readonly subagentName?: string;
+  readonly parentCallId?: string;
+  readonly parentRunId?: string;
+  readonly channel?: ChannelMetadata;
+  readonly audience?: string;
+  readonly title?: string;
+  readonly scheduleId?: string;
+  readonly currentPrincipal?: PrincipalMetadata;
+  readonly initiatorPrincipal?: PrincipalMetadata;
+  readonly delivery?: {
+    readonly id: string;
+    readonly input?: unknown;
+    readonly channelName: string;
+    readonly requestId?: string;
+  };
+}
 
 export interface StepOptions {
   readonly index: number;

@@ -4,6 +4,8 @@ import {
   SpanStatusCode,
   context,
   trace,
+  createTraceState,
+  type SpanContext,
   type Context,
   type Tracer,
 } from "#compiled/@opentelemetry/api/index.js";
@@ -25,7 +27,27 @@ import { linkAttributes } from "#tracing/core/links.js";
 
 function parentContext(reference: TraceReference | undefined, host?: ExecutionContext): Context {
   const base = (host as Context | undefined) ?? ROOT_CONTEXT;
-  return reference === undefined ? base : trace.setSpan(base, trace.wrapSpanContext(reference));
+  return reference === undefined
+    ? base
+    : trace.setSpan(base, trace.wrapSpanContext(otelReference(reference)));
+}
+
+function otelReference(reference: TraceReference): SpanContext {
+  return {
+    ...reference,
+    traceState:
+      reference.tracestate === undefined ? undefined : createTraceState(reference.tracestate),
+  };
+}
+
+function portableReference(reference: SpanContext): TraceReference {
+  return {
+    traceId: reference.traceId,
+    spanId: reference.spanId,
+    traceFlags: reference.traceFlags,
+    isRemote: reference.isRemote,
+    tracestate: reference.traceState?.serialize(),
+  };
 }
 
 function mappedAttributes(
@@ -39,18 +61,21 @@ function mappedAttributes(
 export function liveOtelBackend(tracer: Tracer, mapping?: OutputMapping): TraceBackend {
   function start(span: PreparedSpan, executionContext?: ExecutionContext): SpanWriter {
     const recorded = tracer.startSpan(
-      mapping?.name?.(span, span.name) ?? span.name,
+      span.name,
       {
         attributes: mappedAttributes(mapping, span, span.attributes),
         kind: span.kind === undefined ? undefined : SpanKind[span.kind],
         root: span.root,
         startTime: span.startTimeMs,
-        links: span.links?.map((link) => mapping?.link(span, link) ?? linkAttributes(link)),
+        links: span.links?.map((link) => ({
+          context: otelReference(link.context),
+          attributes: mapping?.link(span, link) ?? linkAttributes(link).attributes,
+        })),
       },
       parentContext(span.root ? undefined : span.parent, executionContext),
     );
     return {
-      reference: recorded.spanContext(),
+      reference: portableReference(recorded.spanContext()),
       setAttribute(key, value) {
         for (const [name, mapped] of Object.entries(
           mappedAttributes(mapping, span, { [key]: value }),
@@ -72,12 +97,15 @@ export function liveOtelBackend(tracer: Tracer, mapping?: OutputMapping): TraceB
   }
   return {
     start,
-    current: () => trace.getSpan(context.active())?.spanContext(),
+    current: () => {
+      const active = trace.getSpan(context.active())?.spanContext();
+      return active === undefined ? undefined : portableReference(active);
+    },
     run(reference, capture, execute, executionContext) {
       // Retain baggage and host context while replacing the semantic parent span.
       let active = trace.setSpan(
         (executionContext as Context | undefined) ?? context.active(),
-        trace.wrapSpanContext(reference),
+        trace.wrapSpanContext(otelReference(reference)),
       );
       active = withErrorContent(active, capture.recordOutputs);
       if (!capture.emit || (reference.traceFlags & 1) === 0) active = suppressTracing(active);
@@ -100,7 +128,7 @@ export function durableOtelBackend(input: {
     ...live,
     admits(span, reference) {
       return input.samplesTrace(reference.traceId, {
-        name: input.mapping?.name?.(span, span.name) ?? span.name,
+        name: span.name,
         attributes: mappedAttributes(input.mapping, span, span.attributes),
       });
     },
@@ -112,7 +140,7 @@ export function durableOtelBackend(input: {
         traceFlags:
           capture.emit &&
           input.samplesTrace(traceId, {
-            name: input.mapping?.name?.(span, span.name) ?? span.name,
+            name: span.name,
             attributes: mappedAttributes(input.mapping, span, span.attributes),
           })
             ? 1

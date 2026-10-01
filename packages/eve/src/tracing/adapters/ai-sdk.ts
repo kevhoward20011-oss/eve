@@ -25,13 +25,13 @@ export function aiSdkTracing(
     models.set(event.callId, next);
     return next;
   }
-  async function drain(error?: unknown) {
+  async function drain(error?: unknown, cancelled = false) {
     for (const operation of models.values())
       await operation.finish({ failed: error !== undefined, error });
     for (const { tool, action } of tools.values()) {
       await tool.finish({ failed: error !== undefined, error });
       await action.finish({
-        outcome: error === undefined ? "abandoned" : "failed",
+        outcome: cancelled ? "cancelled" : error === undefined ? "abandoned" : "failed",
         failed: error !== undefined,
         error,
       });
@@ -132,7 +132,7 @@ export function aiSdkTracing(
       await drain();
     },
     async onAbort() {
-      await drain();
+      await drain(undefined, true);
     },
     async onError(event) {
       await drain((event as { error: unknown }).error);

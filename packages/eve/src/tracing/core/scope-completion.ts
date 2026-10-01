@@ -65,7 +65,7 @@ export function completeScope(
 }
 
 export function capturedScopeData(data: ScopeData, capture: CaptureDecision): ScopeData {
-  if (capture.recordInputs) return data;
+  if (capture.emit && capture.recordInputs) return data;
   switch (data.type) {
     case "activation":
       return {

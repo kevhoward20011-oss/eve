@@ -47,7 +47,10 @@ export function mcpLifecycle(input: {
       if (update.statusCode !== undefined) input.write(rpcStatusAttributes(update.statusCode));
     },
     error(error, type) {
-      input.error(input.recordOutputs ? error : undefined, type);
+      input.error(
+        input.recordOutputs ? error : undefined,
+        type ?? (error instanceof Error ? error.name : undefined),
+      );
     },
     arguments(value) {
       if (input.recordInputs)

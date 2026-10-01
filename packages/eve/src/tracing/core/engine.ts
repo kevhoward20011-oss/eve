@@ -17,7 +17,7 @@ export interface TraceOperation extends SpanWriter {
 }
 
 export function createTraceEngine(input: {
-  readonly backend: TraceBackend;
+  readonly backend: TraceBackend | DurableTraceBackend;
   readonly diagnostic?: (code: string) => void;
 }) {
   function report(): void {
@@ -61,11 +61,25 @@ export function createTraceEngine(input: {
           );
       },
       addEvent(name, attributes, timeMs) {
-        if (!finished) safely(() => writer?.addEvent(name, attributes, timeMs));
+        if (!finished)
+          safely(() =>
+            writer?.addEvent(
+              name,
+              attributes === undefined
+                ? undefined
+                : (withoutDeclinedContent(attributes, capture) as Attributes),
+              timeMs,
+            ),
+          );
       },
       fail(error, errorType) {
         if (!finished)
-          safely(() => writer?.fail(capture.recordOutputs ? error : undefined, errorType));
+          safely(() =>
+            writer?.fail(
+              capture.recordOutputs ? error : undefined,
+              errorType ?? (error instanceof Error ? error.name : undefined),
+            ),
+          );
       },
       setStatus(code) {
         if (!finished) safely(() => writer?.setStatus(code));
@@ -118,16 +132,15 @@ export function createTraceEngine(input: {
       capture: CaptureDecision,
       executionContext?: ExecutionContext,
     ): TraceOperation {
-      const backend = input.backend as Partial<DurableTraceBackend>;
-      if (backend.startReserved === undefined)
+      const backend = input.backend;
+      if (!("startReserved" in backend))
         throw new Error("Durable tracing requires a backend with reserved-ID support.");
+      const startReserved = backend.startReserved.bind(backend);
       const attributes = (withoutDeclinedContent(span.attributes, capture) ??
         span.attributes) as Attributes;
       return wrap(
         capture.emit
-          ? safely(() =>
-              backend.startReserved!({ ...span, attributes }, reference, executionContext),
-            )
+          ? safely(() => startReserved({ ...span, attributes }, reference, executionContext))
           : undefined,
         capture,
         executionContext,

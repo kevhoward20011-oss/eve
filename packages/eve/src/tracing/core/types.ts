@@ -26,6 +26,7 @@ export interface TraceReference {
   readonly spanId: string;
   readonly traceFlags: number;
   readonly isRemote?: boolean;
+  readonly tracestate?: string;
 }
 
 export interface CaptureDecision {
@@ -94,12 +95,8 @@ export interface MappingContext {
 }
 
 export interface OutputMapping {
-  name?(span: MappingContext, name: string): string;
   attributes(span: MappingContext, attributes: Attributes): Attributes;
-  link(
-    span: MappingContext,
-    link: TraceLink,
-  ): { readonly context: TraceReference; readonly attributes: Attributes };
+  link(span: MappingContext, link: TraceLink): Attributes;
 }
 
 export interface RunIdentity {

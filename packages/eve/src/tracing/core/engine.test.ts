@@ -62,11 +62,13 @@ describe("trace engine failure and capture boundary", () => {
     );
     expect(start.mock.calls[0]![0].attributes).toEqual({ "gen_ai.tool.name": "lookup" });
     operation.setAttribute("gen_ai.tool.call.result", "secret");
-    operation.fail(new Error("secret"));
+    operation.addEvent("protocol", { "gen_ai.input.messages": "secret", "rpc.method": "call" });
+    operation.fail(new TypeError("secret"));
     operation.end();
     operation.end();
     expect(writer.setAttribute).not.toHaveBeenCalled();
-    expect(writer.fail).toHaveBeenCalledWith(undefined, undefined);
+    expect(writer.addEvent).toHaveBeenCalledWith("protocol", { "rpc.method": "call" }, undefined);
+    expect(writer.fail).toHaveBeenCalledWith(undefined, "TypeError");
     expect(writer.end).toHaveBeenCalledTimes(1);
   });
 });

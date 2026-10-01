@@ -14,8 +14,6 @@ import {
   SPAN_NAMES,
   CONTENT_FIELDS,
   applyAttributes,
-  type ChannelMetadata,
-  type PrincipalMetadata,
 } from "#tracing/core/contract.js";
 import {
   modelInputAttributes,
@@ -49,25 +47,8 @@ export interface ScopeIdentity extends RunIdentity {
   readonly framework: FrameworkIdentity;
 }
 
-export interface TurnMetadata {
-  readonly sequence: number;
-  readonly subagent?: boolean;
-  readonly subagentName?: string;
-  readonly parentCallId?: string;
-  readonly parentRunId?: string;
-  readonly channel?: ChannelMetadata;
-  readonly audience?: string;
-  readonly title?: string;
-  readonly scheduleId?: string;
-  readonly currentPrincipal?: PrincipalMetadata;
-  readonly initiatorPrincipal?: PrincipalMetadata;
-  readonly delivery?: {
-    readonly id: string;
-    readonly input?: unknown;
-    readonly channelName: string;
-    readonly requestId?: string;
-  };
-}
+export type { TurnMetadata } from "#tracing/core/scope-lifecycle.js";
+import type { TurnMetadata } from "#tracing/core/scope-lifecycle.js";
 
 export type {
   StepOptions,
@@ -180,7 +161,7 @@ export interface RuntimeScope {
 }
 
 export function createTraceLifecycle(input: {
-  readonly backend: TraceBackend;
+  readonly backend: TraceBackend | DurableTraceBackend;
   readonly serializer: ContentSerializer;
   readonly checkpointer?: TraceCheckpointer;
   readonly diagnostic?: (code: string) => void;
@@ -212,7 +193,7 @@ export function createTraceLifecycle(input: {
     const startTimeMs = saved?.startTimeMs ?? binding?.startTimeMs ?? Date.now();
     const parentReference = saved?.parent ?? parent?.reference ?? binding?.parent;
     const actualIdentity = saved?.identity ?? identity;
-    const actualCapture =
+    let actualCapture =
       saved === undefined
         ? capture
         : {
@@ -220,7 +201,7 @@ export function createTraceLifecycle(input: {
             recordInputs: capture.recordInputs && saved.capture.recordInputs,
             recordOutputs: capture.recordOutputs && saved.capture.recordOutputs,
           };
-    const actualData = capturedData(saved?.data ?? data, actualCapture);
+    let actualData = capturedData(saved?.data ?? data, actualCapture);
     const actualAttempt = saved?.attempt ?? attempt;
     const links = saved?.links ?? binding?.links;
     let prepared = prepare(
@@ -245,11 +226,11 @@ export function createTraceLifecycle(input: {
         },
       };
     }
-    const durable = input.backend as Partial<DurableTraceBackend>;
+    const durable = input.backend;
     const deferred = binding?.deferred === true || input.checkpointer !== undefined;
     let reference = saved?.reference ?? binding?.reference;
     if (deferred && reference === undefined) {
-      if (durable.reserveActivation === undefined || durable.reserveChild === undefined)
+      if (!("reserveActivation" in durable))
         throw new Error("Checkpointed trace scopes require reserved-ID backend support.");
       reference =
         data.type === "activation"
@@ -267,6 +248,14 @@ export function createTraceLifecycle(input: {
     if (reference === undefined)
       throw new Error("A child trace scope requires its constructed parent.");
     const retainedReference = reference;
+    actualCapture = {
+      emit: actualCapture.emit && (reference.traceFlags & 1) !== 0,
+      recordInputs:
+        actualCapture.emit && (reference.traceFlags & 1) !== 0 && actualCapture.recordInputs,
+      recordOutputs:
+        actualCapture.emit && (reference.traceFlags & 1) !== 0 && actualCapture.recordOutputs,
+    };
+    actualData = capturedData(actualData, actualCapture);
     record ??= {
       key,
       identity: actualIdentity,
@@ -280,8 +269,8 @@ export function createTraceLifecycle(input: {
       outputContext: binding?.outputContext,
       content,
     };
-    if (input.checkpointer !== undefined && saved === undefined)
-      await input.checkpointer.save(record);
+    record = { ...record, data: actualData, capture: actualCapture };
+    if (input.checkpointer !== undefined) await input.checkpointer.save(record);
     let finished = false;
     let started = false;
     const children = new Set<RuntimeScope>();
@@ -300,6 +289,14 @@ export function createTraceLifecycle(input: {
       childData: ScopeData,
       childBinding?: RuntimeBinding,
     ): Promise<RuntimeScope> {
+      if (childData.type === "step" && actualData.type === "activation")
+        childData = {
+          ...childData,
+          options: {
+            ...childData.options,
+            channel: childData.options.channel ?? actualData.options.channel,
+          },
+        };
       if (children.size >= scopeLimit) {
         for (const previous of children) if (previous.finished) children.delete(previous);
         if (children.size >= scopeLimit)
@@ -482,8 +479,11 @@ export function createTraceLifecycle(input: {
         if (operation !== undefined) applyAttributes(operation, gatewayCostAttributes(cost));
       },
       error(error, errorType) {
-        pendingError = { error: actualCapture.recordOutputs ? error : undefined, errorType };
-        if (operation !== undefined) operation.fail(pendingError.error, errorType);
+        pendingError = {
+          error: actualCapture.recordOutputs ? error : undefined,
+          errorType: errorType ?? (error instanceof Error ? error.name : undefined),
+        };
+        if (operation !== undefined) operation.fail(pendingError.error, pendingError.errorType);
       },
     };
     authoring = topologyScope(runtime);
@@ -626,8 +626,8 @@ export function createTraceLifecycle(input: {
 
   return {
     sample(record: ScopeRecord): boolean {
-      const backend = input.backend as Partial<DurableTraceBackend>;
-      if (backend.admits === undefined) return (record.reference.traceFlags & 1) !== 0;
+      const backend = input.backend;
+      if (!("admits" in backend)) return (record.reference.traceFlags & 1) !== 0;
       const span = prepare(
         record.identity,
         record.data,

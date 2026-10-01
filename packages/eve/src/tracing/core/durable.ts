@@ -47,13 +47,21 @@ export function createDurableTraceDriver(input: {
           : input.backend.reserveChild(span.parent, key);
       if (reference === undefined)
         throw new Error("A durable child span requires a parent trace reference.");
+      const emit = capture.emit && (reference.traceFlags & 1) !== 0;
+      capture = {
+        emit,
+        recordInputs: emit && capture.recordInputs,
+        recordOutputs: emit && capture.recordOutputs,
+      };
       const record: DurableSpanRecord = {
         span: {
           ...span,
+          attributes: (withoutDeclinedContent(span.attributes, capture) ??
+            span.attributes) as Attributes,
           startTimeMs: span.startTimeMs ?? Date.now(),
         },
         reference,
-        capture: { ...capture, emit: capture.emit && (reference.traceFlags & 1) !== 0 },
+        capture,
       };
       await input.store.put(key, record);
       return record;

@@ -113,6 +113,8 @@ the only component that starts OTel spans.
 Neutral output uses schema version 1. The optional eve output profile retains
 schema version 4, existing link keys, and Vercel session attribution. Apply output
 mapping before destination filtering. A profile cannot restore denied content.
+Profiles translate only attributes and link attributes; span names and link
+references cannot change. Portable references serialize W3C tracestate.
 
 Request and MCP transport tracing are separate entry points. Pass route templates,
 not user-supplied URLs. Enrich the active tool scope instead of creating a second
