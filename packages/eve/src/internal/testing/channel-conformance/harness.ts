@@ -47,9 +47,16 @@ export interface ChannelDriver {
    * to `record`. HTTP platforms use {@link recordingFetch}.
    */
   createChannel(record: (call: PlatformCall) => void): unknown;
+  /** Undoes anything `createChannel` installed outside the channel, such as a global `fetch`. */
+  dispose?(): void;
   /** A webhook request carrying a person's message. */
   message(text: string): Request;
-  /** Options rendered in one outbound call for a question, or `undefined` when it isn't one. */
+  /**
+   * The options a person can see in one outbound call that posts the question:
+   * `undefined` when the call isn't the question, `[]` when it shows no options.
+   * Read what the platform displays (buttons, or labels in the text), not eve's
+   * request metadata.
+   */
   findOptions(call: PlatformCall, prompt: string): readonly RenderedOption[] | undefined;
   /** A webhook request pressing a rendered option. */
   press(option: RenderedOption): Request;
@@ -86,13 +93,25 @@ export function recordingFetch(
 /**
  * Runs `body` against an agent with `ask_question` and `driver`'s channel. Every
  * interaction goes through the channel's real webhook routes; the only fake is
- * the platform API behind the channel's injected `fetch`.
+ * the platform behind the channel, usually its injected `fetch`.
  */
 export async function withChannelConversation(
   driver: ChannelDriver,
   body: (conversation: ChannelConversation) => Promise<void>,
 ): Promise<void> {
   const calls: PlatformCall[] = [];
+  try {
+    await converse(driver, calls, body);
+  } finally {
+    driver.dispose?.();
+  }
+}
+
+async function converse(
+  driver: ChannelDriver,
+  calls: PlatformCall[],
+  body: (conversation: ChannelConversation) => Promise<void>,
+): Promise<void> {
   const created = driver.createChannel((call) => void calls.push(call));
   if (!isCompiledChannel(created)) throw new Error(`${driver.name} is not a compiled channel.`);
   const channel: CompiledChannel = created;

@@ -5,7 +5,10 @@ import {
   type ChannelDriver,
   withChannelConversation,
 } from "#internal/testing/channel-conformance/harness.js";
-import { chatSdkDriver } from "#internal/testing/channel-conformance/chat-sdk-driver.js";
+import {
+  chatSdkDriver,
+  chatSdkTextDriver,
+} from "#internal/testing/channel-conformance/chat-sdk-driver.js";
 import { slackDriver } from "#internal/testing/channel-conformance/slack-driver.js";
 import { telegramDriver } from "#internal/testing/channel-conformance/telegram-driver.js";
 
@@ -27,7 +30,20 @@ interface BrokenCell {
 const channels: readonly {
   readonly driver: () => ChannelDriver;
   readonly broken?: Partial<Record<HitlRule, BrokenCell>>;
-}[] = [{ driver: chatSdkDriver }, { driver: slackDriver }, { driver: telegramDriver }];
+}[] = [
+  { driver: chatSdkDriver },
+  {
+    driver: chatSdkTextDriver,
+    broken: {
+      "a rendered question shows every option a person can choose": {
+        reason: "#3712: the card's fallback text is only the prompt",
+        symptom: /the question showed \[\]/,
+      },
+    },
+  },
+  { driver: slackDriver },
+  { driver: telegramDriver },
+];
 
 describe.each(channels.map((entry) => ({ ...entry, name: entry.driver().name })))(
   "$name HITL contract",

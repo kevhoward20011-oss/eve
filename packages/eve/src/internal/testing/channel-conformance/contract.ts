@@ -24,9 +24,7 @@ const PROMPT = "Which day works for the review?";
 
 async function askWhichDay(conversation: ChannelConversation) {
   await conversation.say(ASK);
-  const options = await conversation.waitForQuestion(PROMPT);
-  expect(options.map((option) => option.label)).toEqual(["Saturday", "Sunday"]);
-  return options;
+  return await conversation.waitForQuestion(PROMPT);
 }
 
 function expectAnsweredSaturday(output: unknown) {
@@ -39,11 +37,25 @@ function expectAnsweredSaturday(output: unknown) {
 
 export const hitlContract = [
   {
+    rule: "a rendered question shows every option a person can choose",
+    source: "docs/tools/human-in-the-loop.md#questions",
+    requires: [],
+    async run(conversation) {
+      const options = await askWhichDay(conversation);
+      expect(
+        options.map((option) => option.label),
+        `the question showed ${JSON.stringify(options.map((option) => option.label))}`,
+      ).toEqual(["Saturday", "Sunday"]);
+    },
+  },
+  {
     rule: "pressing a rendered option answers the pending question with that option",
     source: "docs/tools/human-in-the-loop.md#answering-from-a-client-or-channel",
     requires: ["buttons"],
     async run(conversation) {
-      const [saturday] = await askWhichDay(conversation);
+      const options = await askWhichDay(conversation);
+      const saturday = options.find((option) => option.label === "Saturday");
+      expect(saturday, "a Saturday option to press").toBeDefined();
       await conversation.press(saturday!);
       expectAnsweredSaturday(await conversation.waitForToolResult("ask_question"));
     },

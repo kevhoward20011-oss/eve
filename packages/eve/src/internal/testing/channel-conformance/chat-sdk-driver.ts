@@ -2,11 +2,13 @@ import { chatSdkChannel } from "#public/channels/chat-sdk/index.js";
 import {
   type Adapter,
   type AdapterPostableMessage,
+  BaseFormatConverter,
   type ChatInstance,
   Message,
   type StateAdapter,
   type WebhookOptions,
   parseMarkdown,
+  toPlainText,
 } from "#compiled/chat/index.js";
 import { createMemoryState } from "#compiled/@chat-adapter/state-memory/index.js";
 import type { ChannelDriver, PlatformCall } from "#internal/testing/channel-conformance/harness.js";
@@ -32,10 +34,76 @@ type Inbound =
  * Drives `chatSdkChannel` with a card-capable direct-message adapter: one
  * thread, no streaming, and every message handed to eve with an empty
  * `context`. The fake adapter is the platform: it reads inbound JSON and
- * records every post and edit. Text-only adapters such as Linq and Photon
- * flatten cards, so they need their own drivers.
+ * records every post and edit.
  */
 export function chatSdkDriver(): ChannelDriver {
+  const driver = chatSdkDriverWith({ name: "chat-sdk", render: (posted) => posted });
+  return {
+    ...driver,
+    capabilities: ["buttons", "text-replies"],
+    findOptions(call, prompt) {
+      if (!isPost(call)) return undefined;
+      const card = cardOf(call.body as AdapterPostableMessage);
+      if (card === undefined || !texts(card).includes(prompt)) return undefined;
+      return nodes(card)
+        .filter((node) => node.type === "button" && node.id !== undefined)
+        .map((button) => ({ handle: button, label: button.label ?? "" }));
+    },
+    press(option) {
+      const button = option.handle as CardNode;
+      return driver.inbound({ actionId: button.id!, kind: "action", value: button.value });
+    },
+  };
+}
+
+/**
+ * The same bridge behind a text-only adapter, as Photon iMessage's behaves:
+ * every post reaches the person as the `chat` package's default plain-text
+ * rendering, so a card shows only its fallback text and has nothing to press.
+ * Photon's real adapter sends over gRPC, so this is the closest in-process
+ * stand-in; it covers eve's bridge and the SDK fallback, not Photon itself.
+ */
+export function chatSdkTextDriver(): ChannelDriver {
+  const converter = new PlainTextConverter();
+  const driver = chatSdkDriverWith({
+    name: "chat-sdk-text",
+    render: (posted) => converter.renderPostable(posted),
+  });
+  return {
+    ...driver,
+    capabilities: ["text-replies"],
+    findOptions(call, prompt) {
+      if (!isPost(call) || typeof call.body !== "string" || !call.body.includes(prompt)) {
+        return undefined;
+      }
+      // #3715's fallback lists each choice as `"<id>" (<label>)`.
+      return [...call.body.matchAll(/"[^"]+" \(([^)]+)\)/gu)].map(([, label]) => ({
+        handle: label,
+        label: label!,
+      }));
+    },
+    press() {
+      throw new Error("A text-only Chat SDK adapter has nothing to press.");
+    },
+  };
+}
+
+class PlainTextConverter extends BaseFormatConverter {
+  fromAst(ast: Parameters<BaseFormatConverter["fromAst"]>[0]): string {
+    return toPlainText(ast);
+  }
+
+  toAst(text: string) {
+    return parseMarkdown(text);
+  }
+}
+
+function chatSdkDriverWith(input: {
+  readonly name: string;
+  readonly render: (posted: AdapterPostableMessage) => unknown;
+}): Omit<ChannelDriver, "capabilities" | "findOptions" | "press"> & {
+  inbound(body: Inbound): Request;
+} {
   nextThread += 1;
   const threadId = `${ADAPTER}:D${nextThread}`;
   let sequence = 0;
@@ -49,11 +117,12 @@ export function chatSdkDriver(): ChannelDriver {
   }
 
   return {
-    name: "chat-sdk",
-    capabilities: ["buttons", "text-replies"],
+    name: input.name,
+    inbound,
     createChannel(record) {
+      const adapter = fakeAdapter(threadId, record, () => (sequence += 1), input.render);
       const bridge = chatSdkChannel({
-        adapters: { [ADAPTER]: fakeAdapter(threadId, record, () => (sequence += 1)) },
+        adapters: { [ADAPTER]: adapter },
         concurrency: "concurrent",
         routes: { [ADAPTER]: `/eve/v1/${ADAPTER}` },
         state: createMemoryState() as StateAdapter,
@@ -66,21 +135,8 @@ export function chatSdkDriver(): ChannelDriver {
       return bridge.channel;
     },
     message: (text) => inbound({ kind: "message", text }),
-    findOptions(call, prompt) {
-      if (call.method !== "postMessage" && call.method !== "editMessage") return undefined;
-      const card = cardOf(call.body as AdapterPostableMessage);
-      if (card === undefined || !texts(card).includes(prompt)) return undefined;
-      const buttons = nodes(card).filter((node) => node.type === "button" && node.id !== undefined);
-      return buttons.length === 0
-        ? undefined
-        : buttons.map((button) => ({ handle: button, label: button.label ?? "" }));
-    },
-    press(option) {
-      const button = option.handle as CardNode;
-      return inbound({ actionId: button.id!, kind: "action", value: button.value });
-    },
     postedText(call: PlatformCall) {
-      if (call.method !== "postMessage" && call.method !== "editMessage") return undefined;
+      if (!isPost(call)) return undefined;
       const posted = call.body as AdapterPostableMessage;
       if (typeof posted === "string") return posted;
       if ("markdown" in posted) return posted.markdown;
@@ -90,10 +146,15 @@ export function chatSdkDriver(): ChannelDriver {
   };
 }
 
+function isPost(call: PlatformCall): boolean {
+  return call.method === "postMessage" || call.method === "editMessage";
+}
+
 function fakeAdapter(
   threadId: string,
   record: (call: PlatformCall) => void,
   nextId: () => number,
+  render: (posted: AdapterPostableMessage) => unknown,
 ): Adapter {
   let chat: ChatInstance | null = null;
   const self = {
@@ -145,11 +206,11 @@ function fakeAdapter(
     }),
     async postMessage(id: string, posted: AdapterPostableMessage) {
       const messageId = `posted-${nextId()}`;
-      record({ body: posted, method: "postMessage", response: { id: messageId } });
+      record({ body: render(posted), method: "postMessage", response: { id: messageId } });
       return { id: messageId, raw: posted, threadId: id };
     },
     async editMessage(id: string, messageId: string, posted: AdapterPostableMessage) {
-      record({ body: posted, method: "editMessage", response: { id: messageId } });
+      record({ body: render(posted), method: "editMessage", response: { id: messageId } });
       return { id: messageId, raw: posted, threadId: id };
     },
     async addReaction() {},
