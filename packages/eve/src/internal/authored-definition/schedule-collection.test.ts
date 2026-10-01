@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { normalizeScheduleCollectionDefinition } from "#internal/authored-definition/schedule-collection.js";
-import { defineScheduleCollection } from "#public/schedules/collection.js";
+import { defineScheduler } from "#public/schedules/collection.js";
 import { inMemoryScheduleProvider } from "#public/schedules/providers/in-memory.js";
 
 const deliver = async () => {};
@@ -32,12 +32,12 @@ describe("normalizeScheduleCollectionDefinition", () => {
       "format",
     ],
   ])("rejects a collection with %s", (_label, override, message) => {
-    const definition = defineScheduleCollection({ ...valid, ...override } as never);
+    const definition = defineScheduler({ ...valid, ...override } as never);
     expect(() => normalizeScheduleCollectionDefinition(definition, "Invalid.")).toThrow(message);
   });
 
   it("accepts a collection with auth and one delivery", () => {
-    const definition = defineScheduleCollection(valid);
+    const definition = defineScheduler(valid);
     expect(normalizeScheduleCollectionDefinition(definition, "Invalid.")).toBe(definition);
   });
 });

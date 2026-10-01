@@ -17,7 +17,7 @@ import type { RunHandle, Runtime, SessionAuthContext } from "#channel/types.js";
 import { slackChannel } from "#public/channels/slack/slackChannel.js";
 import { isScheduleAuth } from "#public/schedules/index.js";
 import type { ResolvedChannelDefinition } from "#runtime/types.js";
-import { defineScheduleCollection } from "#public/schedules/collection.js";
+import { defineScheduler } from "#public/schedules/collection.js";
 import { inMemoryScheduleProvider } from "#public/schedules/providers/in-memory.js";
 import { createScheduleCollectionPayload } from "#runtime/schedules/payload.js";
 
@@ -79,7 +79,7 @@ describe("ScheduleDispatcher", () => {
     };
     function trigger(stored: string[], configured = stored, auth: typeof creator | null = creator) {
       const runtime = createMockRuntime();
-      const definition = defineScheduleCollection({
+      const definition = defineScheduler({
         provider: inMemoryScheduleProvider(),
         auth: () => auth,
         deliveries: Object.fromEntries(

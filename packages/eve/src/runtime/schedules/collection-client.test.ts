@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { defineScheduleCollection } from "#public/schedules/collection.js";
+import { defineScheduler } from "#public/schedules/collection.js";
 import { defineScheduleDelivery } from "#public/schedules/delivery.js";
 import { inMemoryScheduleProvider } from "#public/schedules/providers/in-memory.js";
 import {
@@ -38,7 +38,7 @@ function setup(capture: { a?: () => unknown; b?: () => unknown } = {}) {
   const provider = inMemoryScheduleProvider();
   const create = vi.spyOn(provider, "create");
   const deliver = async () => {};
-  const collection = defineScheduleCollection({
+  const collection = defineScheduler({
     provider,
     auth: () => null,
     deliveries: {

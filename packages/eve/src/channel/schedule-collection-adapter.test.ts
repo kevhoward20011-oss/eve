@@ -4,8 +4,8 @@ import type { ChannelAdapterContext } from "#channel/adapter.js";
 import { createScheduleCollectionAdapterState } from "#channel/schedule-collection-adapter.js";
 import { SCHEDULE_ADAPTER } from "#channel/schedule.js";
 import {
-  defineScheduleCollection,
-  type ScheduleCollectionDefinition,
+  defineScheduler,
+  type SchedulerDefinition,
   type ScheduleDeliveryBinding,
 } from "#public/schedules/collection.js";
 import { DeliveryRejected, type ScheduleDeliveryDefinition } from "#public/schedules/delivery.js";
@@ -47,7 +47,7 @@ function occurrenceSession(
     auth?: typeof creator | null;
   } = {},
 ) {
-  const definition: ScheduleCollectionDefinition<unknown, unknown> = defineScheduleCollection({
+  const definition: SchedulerDefinition<unknown, unknown> = defineScheduler({
     provider: inMemoryScheduleProvider(),
     auth: () => (options.auth === undefined ? creator : options.auth),
     deliveries,

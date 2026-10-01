@@ -1,4 +1,4 @@
-import { defineScheduleCollection, defineScheduleDelivery } from "eve/experimental/schedules";
+import { defineScheduler, defineScheduleDelivery } from "eve/experimental/schedules";
 import { inMemoryScheduleProvider } from "eve/experimental/schedules/testing";
 import { z } from "zod";
 import {
@@ -6,7 +6,7 @@ import {
   recordCollectionOccurrence,
 } from "../lib/collection-occurrences";
 
-export default defineScheduleCollection({
+export default defineScheduler({
   description: "Manage process-local demonstration requests for the scheduling fixture.",
   provider: inMemoryScheduleProvider(),
   request: z.string().min(1).max(2000),
