@@ -164,7 +164,7 @@ describe("mcpChannel tools over real HTTP", () => {
     const names = tools.map((tool) => tool.name);
     // The channel's own agent_* tools come first; the agent's tools follow in name order.
     expect(names.slice(0, 4)).toEqual(["agent_start", "agent_get", "agent_update", "agent_cancel"]);
-    expect(names.slice(4)).toEqual([...names.slice(4)].sort());
+    expect(names.slice(4)).toEqual(names.slice(4).sort());
     expect(names).toEqual(expect.arrayContaining(["deploy", "echo", "issues"]));
     expect(tools.find((tool) => tool.name === "deploy")).toMatchObject({
       _meta: { "dev.eve/approval": true },

@@ -847,7 +847,7 @@ describe("mcpChannel tools", () => {
   });
 
   it("starts agent_* work as the route caller, not the forwarded principal", async () => {
-    const createSession = vi.fn(async () => {
+    const createSession = vi.fn(async (_input: unknown) => {
       throw new Error("stop after createSession");
     });
     const header = Buffer.from(
