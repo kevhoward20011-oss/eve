@@ -230,7 +230,10 @@ function sseScanner(id: unknown, scope: McpRequestScope): TransformStream<Uint8A
     // the event early.
     const heldCr = !final && buffer.endsWith("\r");
     const lines = (heldCr ? buffer.slice(0, -1) : buffer).split(/\r\n|\r|\n/u);
-    buffer = final ? "" : (lines.pop() ?? "") + (heldCr ? "\r" : "");
+    // The last piece has no line ending yet. At end of stream it is an
+    // unterminated line, not a blank one, so it never ends an event.
+    const rest = lines.pop() ?? "";
+    buffer = final ? "" : rest + (heldCr ? "\r" : "");
     for (const line of lines) {
       if (line === "") flushEvent();
       else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /u, ""));
