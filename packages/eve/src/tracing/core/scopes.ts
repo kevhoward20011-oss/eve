@@ -34,7 +34,6 @@ import type {
   TraceReference,
   Usage,
 } from "#tracing/core/types.js";
-import type { ActionKind } from "#tracing/core/types.js";
 import { gatewayCostAttributes } from "#tracing/core/gateway.js";
 import type { ScopeCost } from "#tracing/core/scope-lifecycle.js";
 import {
@@ -70,44 +69,23 @@ export interface TurnMetadata {
   };
 }
 
-export interface StepOptions {
-  readonly index: number;
-  readonly attempt?: number;
-  readonly channel?: ChannelMetadata;
-  readonly runtimeContext?: Readonly<Record<string, unknown>>;
-}
-
-export interface ModelOptions {
-  readonly provider: string;
-  readonly modelId: string;
-  readonly messages?: readonly unknown[];
-  readonly instructions?: unknown;
-  readonly runtimeContext?: Readonly<Record<string, unknown>>;
-}
-
-export interface ActionOptions {
-  readonly callId: string;
-  readonly name: string;
-  readonly kind?: ActionKind;
-  readonly arguments?: unknown;
-}
-
-export interface ApprovalOptions {
-  readonly requestId: string;
-  readonly request?: unknown;
-}
-export interface MemoryOptions {
-  readonly operation: "search_memory" | "upsert_memory";
-  readonly phase: string;
-  readonly slot: string;
-  readonly storeId: string;
-}
+export type {
+  StepOptions,
+  ModelOptions,
+  ActionOptions,
+  ApprovalOptions,
+  MemoryOptions,
+} from "#tracing/core/scope-lifecycle.js";
+import type {
+  StepOptions,
+  ModelOptions,
+  ActionOptions,
+  ApprovalOptions,
+  MemoryOptions,
+} from "#tracing/core/scope-lifecycle.js";
 export type ModelResult = Parameters<typeof modelResultAttributes>[0];
-export interface MemoryResult<T> {
-  readonly value: T;
-  readonly recordCount?: number;
-  readonly records?: readonly { id?: string; content: string }[];
-}
+export type { MemoryResult } from "#tracing/core/scope-lifecycle.js";
+import type { MemoryResult } from "#tracing/core/scope-lifecycle.js";
 
 export interface TurnScope {
   step<T>(options: StepOptions, execute: (step: StepScope) => Promise<T>): Promise<T>;
