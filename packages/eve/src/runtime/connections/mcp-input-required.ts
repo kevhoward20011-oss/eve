@@ -209,8 +209,12 @@ function sseScanner(id: unknown, scope: McpRequestScope): TransformStream<Uint8A
     data = [];
   };
   const scanLines = (final: boolean) => {
-    const lines = buffer.split(/\r\n|\r|\n/u);
-    buffer = final ? "" : (lines.pop() ?? "");
+    // A trailing CR may be the first half of a CRLF split across chunks; hold
+    // it back so the LF that follows does not read as a blank line and end
+    // the event early.
+    const heldCr = !final && buffer.endsWith("\r");
+    const lines = (heldCr ? buffer.slice(0, -1) : buffer).split(/\r\n|\r|\n/u);
+    buffer = final ? "" : (lines.pop() ?? "") + (heldCr ? "\r" : "");
     for (const line of lines) {
       if (line === "") flushEvent();
       else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /u, ""));
@@ -267,7 +271,9 @@ export function parseInputRequiredResult(
   if (!isObject(inputRequests)) {
     return "The MCP server returned input_required with malformed inputRequests.";
   }
-  const requests: Record<string, McpInputRequest> = {};
+  // Request ids are server-chosen keys: a null-prototype map keeps an id like
+  // `__proto__` an ordinary entry instead of a prototype write.
+  const requests: Record<string, McpInputRequest> = Object.create(null);
   for (const [key, entry] of Object.entries(inputRequests)) {
     if (!isObject(entry) || typeof entry["method"] !== "string") {
       return `The MCP server returned input_required with a malformed request "${key}".`;
@@ -362,7 +368,7 @@ function singleBooleanProperty(schema: unknown): string | undefined {
 
 /** Every entry is a URL elicitation: one sign-in prompt, accepted together. */
 function planSignIn(entries: readonly (readonly [string, McpInputRequest])[]): McpInputPlan {
-  const approve: Record<string, unknown> = {};
+  const approve: Record<string, unknown> = Object.create(null);
   const links: McpSignInLink[] = [];
   for (const [key, request] of entries) {
     const url = request.params?.["url"];
