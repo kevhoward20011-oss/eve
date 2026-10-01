@@ -3,8 +3,17 @@ export type { ActivationMetadata, TurnInput, TurnScope } from "#tracing/core/age
 export { createTraceEngine } from "#tracing/core/engine.js";
 export * from "#tracing/core/contract.js";
 export type { TraceOperation } from "#tracing/core/engine.js";
-export { createAgentOperations } from "#tracing/core/operations.js";
-export type { ActionKind, ActionOutcome } from "#tracing/core/operations.js";
+export { createScopeRuntime } from "#tracing/core/scopes.js";
+export type {
+  StepScope,
+  ActionScope,
+  ScopePersistence,
+  ScopeRecord,
+  RuntimeBinding,
+  RuntimeScope,
+  ScopeTerminal,
+} from "#tracing/core/scopes.js";
+export type { ActionKind, ActionOutcome } from "#tracing/core/types.js";
 export { createDurableTraceDriver } from "#tracing/core/durable.js";
 export type { DurableSpanRecord, DurableSpanStore } from "#tracing/core/durable.js";
 export type {

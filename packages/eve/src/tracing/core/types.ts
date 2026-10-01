@@ -108,6 +108,9 @@ export interface Usage {
   };
 }
 
+export type ActionKind = "load-skill" | "remote-agent-call" | "subagent-call" | "tool-call";
+export type ActionOutcome = "abandoned" | "cancelled" | "completed" | "failed" | "rejected";
+
 export type ContentPart =
   | { readonly type: "text"; readonly text: string }
   | { readonly type: "reasoning"; readonly text: string }

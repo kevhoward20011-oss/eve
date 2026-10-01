@@ -200,7 +200,7 @@ export function toolAttributes(input: {
   return {
     ...input.identity,
     ...namingAttributes(toolName(input.name), "execute_tool"),
-    ...(input.agentName === undefined ? undefined : { "gen_ai.agent.name": input.agentName }),
+    "gen_ai.agent.name": input.agentName,
     "gen_ai.operation.name": "execute_tool",
     "gen_ai.tool.call.id": input.callId,
     "gen_ai.tool.name": input.name,
@@ -245,7 +245,7 @@ export function memoryAttributes(input: {
     "gen_ai.memory.store.id": input.storeId,
     "agent.memory.phase": input.phase,
     "agent.memory.slot": input.slot,
-    ...(input.turnId === undefined ? undefined : { "agent.turn.id": input.turnId }),
+    "agent.turn.id": input.turnId,
   };
 }
 
@@ -280,16 +280,10 @@ export function mcpAttributes(input: {
     "mcp.method.name": input.method,
     "network.protocol.name": "http",
     "network.transport": "tcp",
-    ...(input.protocolVersion === undefined
-      ? undefined
-      : { "mcp.protocol.version": input.protocolVersion }),
-    ...(input.requestId === undefined ? undefined : { "jsonrpc.request.id": input.requestId }),
-    ...(input.method === "tools/call"
-      ? {
-          "gen_ai.operation.name": "execute_tool",
-          ...(input.toolName === undefined ? undefined : { "gen_ai.tool.name": input.toolName }),
-        }
-      : undefined),
+    "mcp.protocol.version": input.protocolVersion,
+    "jsonrpc.request.id": input.requestId,
+    "gen_ai.operation.name": input.method === "tools/call" ? "execute_tool" : undefined,
+    "gen_ai.tool.name": input.method === "tools/call" ? input.toolName : undefined,
   };
 }
 
@@ -323,7 +317,7 @@ export function requestStatusAttributes(status: number): Attributes {
 export function mcpSessionAttributes(id: string): Attributes {
   return { "mcp.session.id": id };
 }
-export function rpcStatusAttributes(code: number): Attributes {
+export function rpcStatusAttributes(code: number | string): Attributes {
   return { "rpc.response.status_code": code };
 }
 
@@ -333,4 +327,11 @@ export function applyAttributes(
 ): void {
   for (const [key, value] of Object.entries(attributes))
     if (value !== undefined) span.setAttribute(key, value);
+}
+
+export function channelRequestMetadata(input: {
+  channelName?: string;
+  channelKind?: string;
+}): Attributes {
+  return { "agent.channel.name": input.channelName, "agent.channel.kind": input.channelKind };
 }

@@ -20,6 +20,7 @@ import type {
   TraceBackend,
   TraceReference,
 } from "#tracing/core/types.js";
+import { linkAttributes } from "#tracing/core/links.js";
 
 function parentContext(reference: TraceReference | undefined): Context {
   return reference === undefined
@@ -44,13 +45,7 @@ export function liveOtelBackend(tracer: Tracer, mapping?: OutputMapping): TraceB
         kind: span.kind === undefined ? undefined : SpanKind[span.kind],
         root: span.root,
         startTime: span.startTimeMs,
-        links: span.links?.map(
-          (link) =>
-            mapping?.link(span, link) ?? {
-              context: link.context,
-              attributes: { "agent.link.type": link.relationship },
-            },
-        ),
+        links: span.links?.map((link) => mapping?.link(span, link) ?? linkAttributes(link)),
       },
       parentContext(span.root ? undefined : span.parent),
     );

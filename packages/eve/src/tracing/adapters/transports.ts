@@ -1,5 +1,12 @@
 import { createTraceEngine } from "#tracing/core/engine.js";
-import { namingAttributes } from "#tracing/core/attributes.js";
+import {
+  requestAttributes,
+  requestStatusAttributes,
+  mcpAttributes,
+  mcpName,
+  applyAttributes,
+  SPAN_NAMES,
+} from "#tracing/core/contract.js";
 import type {
   Attributes,
   CaptureDecision,
@@ -27,24 +34,16 @@ export function createTransportTracing(backend: TraceBackend) {
         {
           type: "channelRequest",
           operationId: `${input.method} ${input.route}`,
-          name: "agent.channel.request",
+          name: SPAN_NAMES.channelRequest,
           kind: "SERVER",
           parent: input.parent,
-          attributes: {
-            ...namingAttributes("agent.channel.request"),
-            "http.request.method": input.method,
-            "http.route": input.route,
-            "url.scheme": input.scheme,
-            "server.address": input.serverAddress,
-            "agent.channel.name": input.channelName,
-            "agent.channel.kind": input.channelKind,
-          },
+          attributes: requestAttributes(input),
         },
         capture,
       );
       try {
         const response = await operation.run(execute);
-        operation.setAttribute("http.response.status_code", response.status);
+        applyAttributes(operation, requestStatusAttributes(response.status));
         if (response.status >= 500) operation.setStatus("ERROR");
         return response;
       } catch (error) {
@@ -70,23 +69,10 @@ export function createTransportTracing(backend: TraceBackend) {
         {
           type: "mcp",
           operationId: `${input.connectionName}:${input.method}`,
-          name:
-            input.method === "tools/call"
-              ? `tools/call ${input.toolName ?? "unknown"}`
-              : "tools/list",
+          name: mcpName(input.method, input.toolName),
           kind: "CLIENT",
           parent: input.parent,
-          attributes: {
-            ...input.attributes,
-            "agent.connection.name": input.connectionName,
-            "mcp.method.name": input.method,
-            "mcp.protocol.version": input.protocolVersion,
-            "network.protocol.name": "http",
-            "network.transport": "tcp",
-            ...(input.method === "tools/call"
-              ? { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": input.toolName }
-              : undefined),
-          },
+          attributes: { ...input.attributes, ...mcpAttributes(input) },
         },
         input.capture,
       );

@@ -314,46 +314,23 @@ describe("standalone agent tracing", () => {
     await tracing.turn(
       { conversationId: "conversation", runId: "run", turnId: "auxiliary", sequence: 0 },
       async (turn) => {
-        const operations = turn.operations;
-        const step = operations.step(turn.activation, {
-          operationId: "step",
-          index: 0,
-          attempt: 0,
-        });
-        const action = operations.action(step, {
-          operationId: "action",
-          callId: "call",
-          name: "lookup",
-          kind: "tool-call",
-          stepIndex: 0,
-          attempt: 0,
-        });
-        const approval = operations.approval(action, {
-          operationId: "approval",
-          callId: "call",
-          actionName: "lookup",
-          requestId: "request",
-          stepIndex: 0,
-          attempt: 0,
-          request: { prompt: "Approve" },
-        });
-        operations.completeApproval(approval, {
-          outcome: "approved",
-          response: "private response",
-        });
-        const memory = operations.memory(action, {
-          operationId: "memory",
-          operation: "search_memory",
-          phase: "retrieve",
-          slot: "history",
-          storeId: "store",
-        });
-        operations.completeMemory(memory, {
-          recordCount: 1,
-          records: [{ content: "Permitted record" }],
-        });
-        operations.completeAction(action, { outcome: "completed", output: "private output" });
-        step.end();
+        await turn.step({ index: 0 }, (step) =>
+          step.action({ callId: "call", name: "lookup" }, async (action) => {
+            await action.approval(
+              { requestId: "request", request: { prompt: "Approve" } },
+              async () => "private response",
+            );
+            await action.memory(
+              { operation: "search_memory", phase: "retrieve", slot: "history", storeId: "store" },
+              async () => ({
+                value: null,
+                recordCount: 1,
+                records: [{ content: "Permitted record" }],
+              }),
+            );
+            return "private output";
+          }),
+        );
       },
     );
     const transport = createTransportTracing(runtime.backend);

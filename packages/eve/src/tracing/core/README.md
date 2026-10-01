@@ -1,18 +1,18 @@
-# Agent tracing library
+# Agent trace scopes
 
-This internal library records agent traces without an eve session or workflow.
-It does not register an OTel provider or change eve's installed instrumentation.
-The modules are not public package exports.
+This internal library constructs agent trace topology. It owns span names,
+attributes, parent relationships, content projection, and terminal events.
+The application supplies semantic data and callbacks, not OTel attributes.
+These modules are not public package exports.
 
-## Trace an AI SDK turn
+## Callback DSL
 
-Install an OTel provider and an async context manager in the application first.
-Pass its tracer to `liveOtelBackend()`.
+Install an OTel provider and async context manager first. The library does not
+replace process-wide OTel setup.
 
 ```ts
-import { generateText } from "ai";
 import { createAgentTracing } from "#tracing/core/index.js";
-import { aiSdkTracing, aiSdkContentSerializer, liveOtelBackend } from "#tracing/adapters/index.js";
+import { liveOtelBackend, aiSdkContentSerializer } from "#tracing/adapters/index.js";
 
 const tracing = createAgentTracing({
   agentName: "support",
@@ -22,61 +22,76 @@ const tracing = createAgentTracing({
 });
 
 await tracing.turn({ conversationId, runId, turnId, sequence: 0 }, async (turn) => {
+  await turn.step({ index: 0 }, async (step) => {
+    const response = await step.model({ provider, modelId }, callModel, modelResult);
+    return await step.action({ callId, name: "lookup" }, async (action) => {
+      await action.approval({ requestId }, requestApproval);
+      return await action.tool(executeLookup);
+    });
+  });
+});
+```
+
+A turn can construct steps. A step can construct models and actions. An action
+can construct tools and approvals. Each constructor controls its child's parent
+and lifetime. Memory operations can run in turn, step, and action scopes.
+No authoring scope exposes a span, attribute map, checkpoint, or resume method.
+
+`modelResult` converts the application's model result into semantic usage,
+response identity, finish reason, and permitted response parts. The callback's
+return value passes through unchanged. Failed callbacks keep the original error.
+
+Content capture is off by default. Set `content.recordInputs` and
+`content.recordOutputs` separately. A delegated activation starts a fresh trace
+and links only its first turn to the caller. Related activations retain the
+same conversation identity.
+
+## SDK hooks
+
+Use `aiSdkTracing(turn)` for SDK-owned execution. Its hooks construct the same
+scopes internally. Application code needs only the turn callback:
+
+```ts
+await tracing.turn({ conversationId, runId, turnId, sequence: 0 }, async (turn) => {
   return await generateText({ model, messages, tools, telemetry: aiSdkTracing(turn) });
 });
 ```
 
-Each turn starts a new root. The SDK adapter creates steps, model calls, actions,
-and tool executions. SDK retries have separate model spans. Turn usage counts
-completed physical model calls once. Content capture is off by default.
+Consume streaming responses inside the callback. Do not return an unconsumed
+stream or detach child work. Physical SDK retries have separate model spans.
+Unrelated integrations can pass through `aiSdkTracing(turn, { integrations })`.
+Do not install a second integration that records the same model or tool spans.
 
-Consume a streaming response inside the turn callback. Do not return an unconsumed
-stream or start detached work. Other SDK calls can use the same turn. Each call
-gets independent correlation state and unique step indices.
+## Runtime persistence
 
-Pass unrelated SDK integrations through `aiSdkTracing(turn, { integrations })`.
-Do not supply another integration that records the same model and tool spans.
+Configure `persistence` once with a `ScopePersistence` adapter. The library saves
+serializable scope state through `load`, `save`, and `remove`. The adapter joins
+that state to the runtime's existing checkpoint. It does not create a separate
+workflow checkpoint.
 
-## Instrument other operations
+Runtime bindings supply stable keys for operations that cross workers. The
+callback DSL remains unchanged. Internal runtime scopes can restore state by
+key and accept a terminal event in another worker. Only the application runtime
+controls suspension, retry, and replay. Tracing never reruns callbacks itself.
 
-`createAgentOperations()` provides steps, models, actions, tools, approvals, and
-memory operations. Framework adapters supply operation IDs, explicit parents,
-and terminal outcomes. `operation.run()` activates its async context.
-Call `turn.own(operation)` when the turn must close an operation on exit.
+Persistence requires a backend with reserved-ID support. Restore preserves
+parent identity, start time, capture ceiling, and operation metadata. Denied
+content does not enter persisted state. The caller serializes state changes for
+one operation key and owns export deduplication.
 
-`createTransportTracing()` records request and MCP fallback spans separately.
-Request route inputs must be registered templates, not user-supplied URLs.
-Annotate an existing tool through `operations.engine.annotate()` instead of
-creating an MCP fallback when the tool already owns the execution.
+The integration layer uses the same runtime scope constructors. It projects existing
+turn, action, and approval records into semantic bindings. Existing workflow
+state remains the sole persistence owner; no second checkpoint tree is added.
 
-`createTraceEngine()` accepts prepared span attributes and supports output types
-from the design contract. Use this lower-level interface for framework events.
-It filters known content attributes before backend creation and late updates.
-Instrumentation failure does not retry application execution.
+## Compatibility and transports
 
-## Durable execution
+Neutral output uses schema version 1. The optional eve output profile retains
+schema version 4, existing link keys, and Vercel session attribution. Apply output
+mapping before destination filtering. A profile cannot restore denied content.
 
-`durableOtelBackend()` requires the supplied ID generator to be installed in the
-host tracer provider. The caller supplies the root sampling function.
-`createDurableTraceDriver()` stores portable span records through a caller-owned
-store. Reserve a record before dispatch. Finish the record in the worker that
-accepts the terminal result.
+Request and MCP transport tracing are separate entry points. Pass route templates,
+not user-supplied URLs. Enrich the active tool scope instead of creating a second
+MCP call span when the tool already owns execution.
 
-The caller must serialize operations on the same key. The store is not a lock or
-a transaction coordinator. Export deduplication remains the caller's responsibility.
-Persist only permitted content. Do not persist application errors in a span record.
-
-## Output compatibility
-
-The default contract uses schema version 1 and no `eve.*` or platform keys.
-Pass `eveOutputMapping()` to the OTel backend to select existing eve schema keys.
-Its optional resolver supplies Vercel trace-session attribution by operation ID.
-The mapping also applies to late attribute updates and durable sampling input.
-
-Other output mappings can override names, metadata attributes, and links.
-Do not rename content attributes without a matching destination redaction policy.
-Apply destination policies after the backend mapping. No mapping changes topology.
-
-This PR supplies the compatibility option but does not install it in eve.
-Agent Runs export, deployment configuration, and remote protocol handling remain
-outside this library.
+Agent Runs export, remote protocol authorization, and global registration remain
+outside scope construction.

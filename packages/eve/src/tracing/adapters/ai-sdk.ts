@@ -1,187 +1,150 @@
 import type { Telemetry, TelemetryOptions } from "ai";
-import type { TraceOperation } from "#tracing/core/engine.js";
-import type { TurnScope } from "#tracing/core/agent-tracing.js";
+import { scopeRuntime, type RuntimeScope, type TurnScope } from "#tracing/core/scopes.js";
 import type { ContentPart } from "#tracing/core/types.js";
-import { usageAttributes } from "#tracing/core/attributes.js";
-import { readGatewayCost } from "#tracing/agent-otel-usage.js";
 
 type Event<K extends keyof Telemetry> = Parameters<NonNullable<Telemetry[K]>>[0];
 
-/** Each SDK invocation owns its correlation state, including physical retries. */
+/** SDK hooks construct the same scopes as the callback DSL. */
 export function aiSdkTracing(
   turn: TurnScope,
   options: { readonly integrations?: readonly Telemetry[] } = {},
 ): TelemetryOptions {
-  const operations = turn.operations;
-  const callIndex = turn.nextStep();
-  let index = callIndex;
-  let modelIndex = 0;
-  let step: TraceOperation | undefined;
-  const models = new Map<string, TraceOperation>();
-  const modelStarts = new Map<string, Event<"onLanguageModelCallStart">>();
-  const tools = new Map<string, { action: TraceOperation; tool: TraceOperation }>();
-  function own(operation: TraceOperation): TraceOperation {
-    turn.own(operation);
-    return operation;
+  const activation = scopeRuntime(turn);
+  let step: RuntimeScope | undefined;
+  const models = new Map<string, RuntimeScope>();
+  const starts = new Map<string, Event<"onLanguageModelCallStart">>();
+  const tools = new Map<string, { action: RuntimeScope; tool: RuntimeScope }>();
+  async function model(event: Event<"onLanguageModelCallStart">) {
+    if (step === undefined || step.finished) return undefined;
+    const next = await step.model({
+      provider: event.provider,
+      modelId: event.modelId,
+      messages: event.messages,
+      instructions: event.instructions,
+    });
+    models.set(event.callId, next);
+    return next;
   }
-  function key(suffix: string): string {
-    return `${turn.identity.turnId}:${callIndex}:${index}:${suffix}`;
-  }
-  function drain(error?: unknown): void {
-    for (const operation of models.values()) {
-      if (error !== undefined) operation.fail(error);
-      operation.end();
-    }
-    for (const { action, tool } of tools.values()) {
-      if (error !== undefined) {
-        tool.fail(error);
-        action.fail(error);
-      }
-      action.setAttribute("agent.action.outcome", error === undefined ? "abandoned" : "failed");
-      tool.end();
-      action.end();
+  async function drain(error?: unknown) {
+    for (const operation of models.values())
+      await operation.finish({ failed: error !== undefined, error });
+    for (const { tool, action } of tools.values()) {
+      await tool.finish({ failed: error !== undefined, error });
+      await action.finish({
+        outcome: error === undefined ? "abandoned" : "failed",
+        failed: error !== undefined,
+        error,
+      });
     }
     models.clear();
-    modelStarts.clear();
+    starts.clear();
     tools.clear();
-    if (step !== undefined && !step.finished) {
-      if (error !== undefined) step.fail(error);
-      step.addEvent(error === undefined ? "step.completed" : "step.failed");
-      step.end();
-    }
-  }
-  function startModel(event: Event<"onLanguageModelCallStart">): TraceOperation | undefined {
-    if (step === undefined || step.finished) return undefined;
-    const operation = own(
-      operations.model(step, {
-        operationId: key(`model:${modelIndex++}`),
-        provider: event.provider,
-        modelId: event.modelId,
-        messages: turn.capture.recordInputs ? event.messages : undefined,
-        instructions: turn.capture.recordInputs ? event.instructions : undefined,
-      }),
-    );
-    models.set(event.callId, operation);
-    return operation;
+    await step?.finish({ failed: error !== undefined, error });
   }
   const integration: Telemetry = {
-    onStepStart() {
-      if (step !== undefined) {
-        drain();
-        index = turn.nextStep();
-      }
-      step = own(operations.step(turn.activation, { operationId: key("step"), index, attempt: 0 }));
+    async onStepStart() {
+      if (step !== undefined) await drain();
+      step = await activation.step({ index: activation.nextStep() });
     },
-    onLanguageModelCallStart(event) {
-      modelStarts.set(event.callId, event);
-      startModel(event);
+    async onLanguageModelCallStart(event) {
+      const projected = {
+        ...event,
+        messages: activation.capture.recordInputs ? event.messages : [],
+        instructions: activation.capture.recordInputs ? event.instructions : undefined,
+      };
+      starts.set(event.callId, projected);
+      await model(projected);
     },
     async executeLanguageModelCall({ callId, execute }) {
-      let operation = models.get(callId);
-      if (operation === undefined) {
-        const start = modelStarts.get(callId);
-        if (start !== undefined) operation = startModel(start);
-      }
+      let active = models.get(callId);
+      if (active === undefined && starts.has(callId)) active = await model(starts.get(callId)!);
       try {
-        return await (operation === undefined ? execute() : operation.run(execute));
+        return await (active === undefined ? execute() : active.run(execute));
       } catch (error) {
         models.delete(callId);
-        operation?.fail(error);
-        operation?.end();
+        await active?.finish({ failed: true, error });
         throw error;
       }
     },
-    onLanguageModelCallEnd(event) {
-      const operation = models.get(event.callId);
+    async onLanguageModelCallEnd(event) {
+      const active = models.get(event.callId);
       models.delete(event.callId);
-      modelStarts.delete(event.callId);
-      if (operation === undefined || operation.finished) return;
-      const usage = {
-        inputTokens: event.usage.inputTokens,
-        outputTokens: event.usage.outputTokens,
-        inputTokenDetails: {
-          cacheReadTokens: event.usage.inputTokenDetails?.cacheReadTokens,
-          cacheWriteTokens: event.usage.inputTokenDetails?.cacheWriteTokens,
+      starts.delete(event.callId);
+      await active?.finish({
+        model: {
+          usage: {
+            inputTokens: event.usage.inputTokens,
+            outputTokens: event.usage.outputTokens,
+            inputTokenDetails: {
+              cacheReadTokens: event.usage.inputTokenDetails?.cacheReadTokens,
+              cacheWriteTokens: event.usage.inputTokenDetails?.cacheWriteTokens,
+            },
+          },
+          responseId: event.responseId,
+          responseModelId: event.modelId,
+          finishReason: event.finishReason,
+          content: activation.capture.recordOutputs ? contentParts(event.content) : undefined,
         },
-      };
-      operations.completeModel(operation, {
-        usage,
-        responseId: event.responseId,
-        responseModelId: event.modelId,
-        finishReason: event.finishReason,
-        content: turn.capture.recordOutputs ? contentParts(event.content) : undefined,
       });
-      if (step !== undefined) operations.engine.annotate(step, usageAttributes(usage));
-      turn.addUsage(usage.inputTokens, usage.outputTokens);
     },
-    onToolExecutionStart(event) {
+    async onToolExecutionStart(event) {
       if (step === undefined || step.finished) return;
       const call = event.toolCall;
-      const action = own(
-        operations.action(step, {
-          operationId: key(`action:${call.toolCallId}`),
-          callId: call.toolCallId,
-          name: call.toolName,
-          kind: "tool-call",
-          stepIndex: index,
-          attempt: 0,
-          arguments: call.input,
-        }),
-      );
-      const tool = own(
-        operations.tool(action, {
-          operationId: key(`tool:${call.toolCallId}`),
-          callId: call.toolCallId,
-          name: call.toolName,
-          arguments: call.input,
-        }),
-      );
-      tools.set(call.toolCallId, { action, tool });
+      const action = await step.action({
+        callId: call.toolCallId,
+        name: call.toolName,
+        arguments: call.input,
+      });
+      tools.set(call.toolCallId, { action, tool: await action.tool() });
     },
     executeTool({ toolCallId, execute }) {
       const active = tools.get(toolCallId)?.tool;
       return active === undefined ? execute() : active.run(execute);
     },
-    onToolExecutionEnd(event) {
+    async onToolExecutionEnd(event) {
       const active = tools.get(event.toolCall.toolCallId);
       tools.delete(event.toolCall.toolCallId);
       if (active === undefined) return;
-      if (event.toolOutput.type === "tool-result") {
-        operations.completeTool(active.tool, { type: "result", output: event.toolOutput.output });
-        operations.completeAction(active.action, {
-          outcome: "completed",
-          output: event.toolOutput.output,
-        });
-      } else {
-        operations.completeTool(active.tool, { type: "error", error: event.toolOutput.error });
-        operations.completeAction(active.action, {
-          outcome: "failed",
-          error: event.toolOutput.error,
+      const terminal =
+        event.toolOutput.type === "tool-result"
+          ? { output: event.toolOutput.output }
+          : { failed: true, error: event.toolOutput.error };
+      await active.tool.finish(terminal);
+      await active.action.finish(terminal);
+    },
+    async onStepEnd(event) {
+      const gateway = event.providerMetadata?.gateway;
+      if (gateway !== undefined && typeof gateway === "object" && gateway !== null) {
+        const data = gateway as Record<string, unknown>;
+        const number = (value: unknown) => {
+          if (typeof value !== "string" || value.trim() === "") return undefined;
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : undefined;
+        };
+        step?.cost({
+          cost: number(data.cost),
+          gatewayCost: number(data.gatewayCost),
+          inputCost: number(data.inputInferenceCost),
+          outputCost: number(data.outputInferenceCost),
+          generationId: typeof data.generationId === "string" ? data.generationId : undefined,
         });
       }
+      await drain();
     },
-    onStepEnd(event) {
-      const cost =
-        event.providerMetadata === undefined ? undefined : readGatewayCost(event.providerMetadata);
-      if (cost !== undefined && step !== undefined) operations.engine.annotate(step, cost);
-      drain();
+    async onAbort() {
+      await drain();
     },
-    onAbort() {
-      turn.cancel();
-      drain();
+    async onError(event) {
+      await drain((event as { error: unknown }).error);
     },
-    onError(event) {
-      drain((event as { error: unknown }).error);
-    },
-    onEnd() {
-      drain();
+    async onEnd() {
+      await drain();
     },
   };
   return {
     isEnabled: true,
-    recordInputs: turn.capture.recordInputs,
-    recordOutputs: turn.capture.recordOutputs,
-    functionId: turn.agentName,
+    recordInputs: activation.capture.recordInputs,
+    recordOutputs: activation.capture.recordOutputs,
     integrations: [integration, ...(options.integrations ?? [])],
   };
 }
