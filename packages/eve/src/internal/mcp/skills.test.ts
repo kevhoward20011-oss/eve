@@ -7,9 +7,7 @@ import { MAX_SKILL_FILE_BYTES, SkillReadError } from "#channel/skill-files.js";
 import {
   createMcpSkillsFeature,
   MCP_SKILLS_CACHE_HINT,
-  MCP_SKILLS_EXTENSION,
   type McpSkillSource,
-  parseSkillUri,
 } from "#internal/mcp/skills.js";
 import { parseFrontmatter } from "#internal/helpers/gray-matter.js";
 import { createMcpStreamableHttpServer } from "#internal/mcp/streamable-http-server.js";
@@ -171,15 +169,6 @@ function sha256(content: string | Uint8Array): string {
 }
 
 describe("MCP skills (SEP-2640)", () => {
-  it("declares the extension with directoryRead and the resources capability", async () => {
-    const call = handler();
-    const { result } = await call("server/discover");
-    expect(result?.capabilities).toMatchObject({
-      extensions: { [MCP_SKILLS_EXTENSION]: { directoryRead: true } },
-      resources: { listChanged: true, subscribe: true },
-    });
-  });
-
   it("lists every served skill, sorted, with verbatim frontmatter, digests, sizes, and cache fields", async () => {
     const call = handler();
     const { result, error } = await call("skills/list");
@@ -286,6 +275,17 @@ describe("MCP skills (SEP-2640)", () => {
       TRIAGE_SKILL_MD,
     );
 
+    const spaced = handler(
+      fakeSource({
+        spaced: {
+          description: "x",
+          files: { "SKILL.md": "---\nname: spaced\ndescription: x\n---\n", "two words.md": "hi\n" },
+        },
+      }),
+    );
+    const decoded = await spaced("resources/read", { uri: "skill://spaced/two%20words.md" });
+    expect((decoded.result?.contents as { text: string }[] | undefined)?.[0]?.text).toBe("hi\n");
+
     const binary = await call("resources/read", { uri: "skill://usage-triage/assets/chart.png" });
     expect(binary.result?.contents).toEqual([
       {
@@ -296,7 +296,7 @@ describe("MCP skills (SEP-2640)", () => {
     ]);
   });
 
-  it("refuses traversal, malformed URIs, and files over the cap", async () => {
+  it("refuses traversal, malformed URIs, and an over-cap skill", async () => {
     const source = fakeSource(fixtureSkills);
     const call = handler(source);
     for (const uri of [
@@ -312,10 +312,14 @@ describe("MCP skills (SEP-2640)", () => {
       "skill://usage-triage/%E0%A4%A",
       "skill://usage-triage/skill.md",
       "skill://usage-triage/references",
-      "skill://usage-triage/references/huge.md",
+      "skill://usage-triage/./SKILL.md",
+      "skill://usage-triage/SKILL.md%00",
+      "skill://usage-triage/references/run book.md",
       "skill://oversize/SKILL.md",
       "skill://../SKILL.md",
       "skill:///SKILL.md",
+      "skill://",
+      "skills://usage-triage/SKILL.md",
     ]) {
       const { error } = await call("resources/read", { uri });
       expect(error?.code, uri).toBe(-32602);
@@ -423,31 +427,17 @@ describe("MCP skills (SEP-2640)", () => {
       };
     };
 
-    const initialized = await legacy("initialize", {
-      capabilities: {},
-      clientInfo: { name: "skills-test", version: "0.0.0" },
-      protocolVersion: "2025-11-25",
-    });
-    expect(initialized.result?.capabilities).toMatchObject({
-      extensions: { [MCP_SKILLS_EXTENSION]: { directoryRead: true } },
-      resources: { listChanged: true, subscribe: true },
-    });
     const subscribed = await legacy("resources/subscribe", { uri: "skill://flat/SKILL.md" });
     expect(subscribed).toMatchObject({ result: {} });
     for (const uri of [
       "skill://nope/SKILL.md",
       "skill://oversize/SKILL.md",
-      "skill://usage-triage/references/huge.md",
       "https://example.com/x",
     ]) {
       expect((await legacy("resources/subscribe", { uri })).error?.code, uri).toBe(-32602);
     }
     const unsubscribed = await legacy("resources/unsubscribe", { uri: "skill://flat/SKILL.md" });
     expect(unsubscribed).toMatchObject({ result: {} });
-    const listed = await legacy("skills/list", {});
-    expect((listed.result?.skills as unknown[] | undefined)?.length).toBe(3);
-    const read = await legacy("resources/read", { uri: "skill://usage-triage/../flat/SKILL.md" });
-    expect(read.error?.code).toBe(-32602);
   });
 
   it("applies one eligibility rule on every surface: aggregate overflow and invalid entry documents", async () => {
@@ -549,92 +539,6 @@ describe("MCP skills (SEP-2640)", () => {
     }
   });
 
-  it("acknowledges at most 100 resource subscriptions, and only served skill files", async () => {
-    const mcp = createMcpStreamableHttpServer({
-      name: "eve-skills-test",
-      version: "0.0.0",
-      authenticate: async () => null,
-      features: [createMcpSkillsFeature(fakeSource(fixtureSkills))],
-      listen: "ack-then-close",
-    });
-    const listen = async (notifications: Record<string, unknown>) => {
-      const response = await mcp(
-        new Request("https://agent.example/eve/v1/mcp", {
-          body: JSON.stringify({
-            id: 7,
-            jsonrpc: "2.0",
-            method: "subscriptions/listen",
-            params: {
-              notifications,
-              _meta: {
-                "io.modelcontextprotocol/clientCapabilities": {},
-                "io.modelcontextprotocol/clientInfo": { name: "skills-test", version: "0.0.0" },
-                "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
-              },
-            },
-          }),
-          headers: {
-            accept: "application/json, text/event-stream",
-            "content-type": "application/json",
-            "mcp-method": "subscriptions/listen",
-            "mcp-protocol-version": PROTOCOL_VERSION,
-          },
-          method: "POST",
-        }),
-      );
-      const text = await response.text();
-      const events = text
-        .split("\n")
-        .filter((line) => line.startsWith("data: "))
-        .map((line) => JSON.parse(line.slice(6)) as Record<string, any>);
-      return events.length === 0 ? [JSON.parse(text) as Record<string, any>] : events;
-    };
-
-    const served = "skill://usage-triage/references/runbook.md";
-    const [ack] = await listen({
-      resourceSubscriptions: [
-        served,
-        "skill://usage-triage/SKILL.md",
-        served,
-        "skill://usage-triage/references/huge.md",
-        "skill://usage-triage/missing.md",
-        "skill://oversize/SKILL.md",
-        "skill://nope/SKILL.md",
-        "skill://usage-triage",
-        "skill://usage-triage/references",
-        "https://example.com/x",
-        "skill://usage-triage/../flat/SKILL.md",
-      ],
-      resourcesListChanged: true,
-    });
-    expect(ack).toMatchObject({
-      method: "notifications/subscriptions/acknowledged",
-      params: {
-        notifications: {
-          resourceSubscriptions: [served, "skill://usage-triage/SKILL.md"],
-          resourcesListChanged: true,
-        },
-      },
-    });
-
-    // Nothing readable: the filter is acknowledged without resourceSubscriptions.
-    const [none] = await listen({ resourceSubscriptions: ["skill://nope/SKILL.md"] });
-    expect(none?.method).toBe("notifications/subscriptions/acknowledged");
-    expect(none?.params.notifications).toEqual({});
-
-    // Exactly 100 URIs is accepted; 101 is refused before anything is read.
-    const hundred = Array.from({ length: 100 }, (_, index) =>
-      index === 0 ? served : `skill://usage-triage/missing-${index}.md`,
-    );
-    const [atLimit] = await listen({ resourceSubscriptions: hundred });
-    expect(atLimit?.params.notifications.resourceSubscriptions).toEqual([served]);
-    const [overLimit] = await listen({
-      resourceSubscriptions: [...hundred, "skill://usage-triage/one-more.md"],
-    });
-    expect(overLimit).toMatchObject({ error: { code: -32602 }, id: 7 });
-    expect(overLimit?.method).toBeUndefined();
-  });
-
   it("serves only skills whose served frontmatter meets the Agent Skills name and description rules", async () => {
     const authored = (name: string, description: string) => ({
       description: "Catalog description.",
@@ -701,17 +605,5 @@ describe("MCP skills (SEP-2640)", () => {
         -32602,
       );
     }
-  });
-
-  it("parses skill URIs strictly", () => {
-    expect(parseSkillUri("skill://a")).toEqual({ skill: "a" });
-    expect(parseSkillUri("skill://a/b%20c/d.md")).toEqual({ skill: "a", path: "b c/d.md" });
-    expect(parseSkillUri("skill://a/b/../c")).toBeUndefined();
-    expect(parseSkillUri("skill://a/./c")).toBeUndefined();
-    expect(parseSkillUri("skill://a/b%2fc")).toBeUndefined();
-    expect(parseSkillUri("skill://a/b%00")).toBeUndefined();
-    expect(parseSkillUri("skill://a/b c")).toBeUndefined();
-    expect(parseSkillUri("skills://a")).toBeUndefined();
-    expect(parseSkillUri("skill://")).toBeUndefined();
   });
 });

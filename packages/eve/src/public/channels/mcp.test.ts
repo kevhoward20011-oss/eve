@@ -4,6 +4,7 @@ import type { SessionAuthContext } from "#channel/types.js";
 import type { RouteHandlerArgs } from "#channel/routes.js";
 import type { AgentDescription } from "#channel/agent-description.js";
 import type { InvokeToolFn } from "#channel/invoke-tool.js";
+import { SkillReadError } from "#channel/skill-files.js";
 import {
   attachAgentInfoRouteResponse,
   attachRouteChannelName,
@@ -490,6 +491,7 @@ interface RouteArgsOverrides {
   readonly createSession?: () => Promise<never>;
   readonly description?: AgentDescription;
   readonly invokeTool?: InvokeToolFn;
+  readonly readSkill?: RouteHandlerArgs["readSkill"];
 }
 
 function routeArgs(overrides: RouteArgsOverrides | (() => Promise<never>) = {}): RouteHandlerArgs {
@@ -503,14 +505,16 @@ function routeArgs(overrides: RouteArgsOverrides | (() => Promise<never>) = {}):
     skills: [],
     tools: [],
   };
+  const descriptionArgs = mockAgentDescriptionRouteArgs();
   const args: RouteHandlerArgs = {
-    ...mockAgentDescriptionRouteArgs(),
+    ...descriptionArgs,
     attachSession: unavailable,
     describe: async () => description,
     from: unavailable,
     params: {},
     requestIp: "127.0.0.1",
     invokeTool: options.invokeTool ?? unusedInvokeTool,
+    readSkill: options.readSkill ?? descriptionArgs.readSkill,
     resolveSession: vi.fn(),
     to: unavailable,
     waitUntil: vi.fn(),
@@ -565,6 +569,13 @@ const CAPS_ALL = {
   elicitation: { form: {}, url: {} },
   extensions: { "dev.eve/tool-sessions": {} },
 };
+const APPROVED = { "dev.eve/approval": { action: "accept", content: { approved: true } } };
+const DEPLOYED = [{ text: "deployed", type: "text" }];
+const INVALID_REQUEST_STATE = {
+  code: -32_602,
+  data: { reason: "invalid_request_state" },
+  message: "Invalid or expired requestState",
+};
 
 const toolsDescription: AgentDescription = {
   name: "compiled-agent",
@@ -605,6 +616,25 @@ const toolsDescription: AgentDescription = {
     },
   ],
 };
+
+const SKILL_MD =
+  "---\nname: usage-triage\ndescription: Triage a usage spike.\n---\nRead references/runbook.md.\n";
+const SKILL_FILES: Readonly<Record<string, string>> = {
+  "SKILL.md": SKILL_MD,
+  "references/runbook.md": "# Runbook\n",
+};
+const skillsDescription: AgentDescription = {
+  ...toolsDescription,
+  skills: [
+    { description: "Triage a usage spike.", files: Object.keys(SKILL_FILES), name: "usage-triage" },
+  ],
+};
+
+async function readSkill(skill: string, path = "SKILL.md"): Promise<string> {
+  const content = skill === "usage-triage" ? SKILL_FILES[path] : undefined;
+  if (content === undefined) throw new SkillReadError("unknown-file", path);
+  return content;
+}
 
 interface ModernCall {
   readonly capabilities?: Readonly<Record<string, unknown>>;
@@ -787,20 +817,13 @@ describe("mcpChannel tools", () => {
 
     const discovered = await rpc(channel, modernRequest("server/discover"), args);
     expect(discovered.result).toMatchObject({ cacheScope: "private", ttlMs: 300_000 });
-  });
 
-  it("keeps the 2025-11-25 fallback listing the same tools", async () => {
-    const listed = await rpc(
-      toolsChannel(),
+    const legacy = await rpc(
+      channel,
       mcpRequest({ id: 1, jsonrpc: "2.0", method: "tools/list" }),
-      routeArgs({ description: toolsDescription }),
+      args,
     );
-    expect(listed.result?.tools.map((tool: { name: string }) => tool.name)).toEqual([
-      ...AGENT_TOOL_NAMES,
-      "deploy",
-      "issues",
-      "plain",
-    ]);
+    expect(legacy.result?.tools).toEqual(listed.result?.tools);
   });
 
   it("reserves the agent_* names over an agent tool with the same name", async () => {
@@ -1047,14 +1070,12 @@ describe("mcpChannel tools", () => {
     expect(invokeTool.mock.calls.at(-1)![2].key).toBeUndefined();
   });
 
-  it("asks for approval with a signed requestState and honors the answer on the retry", async () => {
-    const invokeTool = fakeCore();
+  it("asks for approval with a signed requestState and maps each answer on the retry", async () => {
     const channel = toolsChannel();
-    const args = routeArgs({ description: toolsDescription, invokeTool });
     const first = await rpc(
       channel,
       modernRequest("tools/call", { arguments: { env: "prod" }, name: "deploy" }),
-      args,
+      routeArgs({ description: toolsDescription, invokeTool: fakeCore() }),
     );
     expect(first.result).toMatchObject({
       _meta: { "dev.eve/approval": { callId: "call_new", tool: "deploy" } },
@@ -1077,165 +1098,161 @@ describe("mcpChannel tools", () => {
     const requestState = first.result?.requestState as string;
     expect(requestState.startsWith("v1.")).toBe(true);
 
-    const approved = await rpc(
-      channel,
-      modernRequest("tools/call", {
-        arguments: { env: "prod" },
-        inputResponses: { "dev.eve/approval": { action: "accept", content: { approved: true } } },
-        name: "deploy",
-        requestState,
-      }),
-      args,
-    );
-    expect(approved.result).toMatchObject({ content: [{ text: "deployed", type: "text" }] });
-    expect(invokeTool.mock.calls[1]![2]).toMatchObject({
-      approval: { approved: true },
-      callId: "call_new",
-      oneOffNonce: "nonce-1",
-    });
-  });
-
-  it("treats decline, cancel, and approved:false as a denial", async () => {
-    const channel = toolsChannel();
-    for (const response of [
-      { action: "decline" },
-      { action: "cancel" },
-      { action: "accept", content: { approved: false } },
-    ]) {
+    const denied = {
+      structuredContent: {
+        error: { code: "denied", message: "The person declined.", retryable: false },
+      },
+    };
+    const askedAgain = { requestState: expect.any(String), resultType: "input_required" };
+    const answers: Array<{
+      readonly answer: Readonly<Record<string, unknown>>;
+      readonly approval: { readonly approved: boolean } | undefined;
+      readonly expected: Readonly<Record<string, unknown>>;
+      readonly state?: string;
+    }> = [
+      {
+        answer: { action: "accept", content: { approved: true } },
+        approval: { approved: true },
+        expected: { content: DEPLOYED },
+        state: requestState,
+      },
+      {
+        answer: { action: "decline" },
+        approval: { approved: false },
+        expected: denied,
+        state: requestState,
+      },
+      {
+        answer: { action: "cancel" },
+        approval: { approved: false },
+        expected: denied,
+        state: requestState,
+      },
+      {
+        answer: { action: "accept", content: { approved: false } },
+        approval: { approved: false },
+        expected: denied,
+        state: requestState,
+      },
+      // No answer asks again; it never declines.
+      {
+        answer: { action: "accept", content: {} },
+        approval: undefined,
+        expected: askedAgain,
+        state: requestState,
+      },
+      // Without a requestState, inputResponses are ignored.
+      {
+        answer: { action: "accept", content: { approved: true } },
+        approval: undefined,
+        expected: askedAgain,
+      },
+    ];
+    for (const { answer, approval, expected, state } of answers) {
       const invokeTool = fakeCore();
-      const args = routeArgs({ description: toolsDescription, invokeTool });
-      const first = await rpc(
-        channel,
-        modernRequest("tools/call", { arguments: {}, name: "deploy" }),
-        args,
-      );
+      const params: Record<string, unknown> = {
+        arguments: { env: "prod" },
+        inputResponses: { "dev.eve/approval": answer },
+        name: "deploy",
+      };
+      if (state !== undefined) params.requestState = state;
       const retried = await rpc(
         channel,
-        modernRequest("tools/call", {
-          arguments: {},
-          inputResponses: { "dev.eve/approval": response },
-          name: "deploy",
-          requestState: first.result?.requestState,
-        }),
-        args,
+        modernRequest("tools/call", params),
+        routeArgs({ description: toolsDescription, invokeTool }),
       );
-      expect(retried.result?.structuredContent).toEqual({
-        error: { code: "denied", message: "The person declined.", retryable: false },
-      });
-      expect(invokeTool.mock.calls[1]![2].approval).toEqual({ approved: false });
+      const label = `${JSON.stringify(answer)} ${state === undefined ? "without" : "with"} state`;
+      expect(retried.result, label).toMatchObject(expected);
+      const [, , options] = invokeTool.mock.calls[0]!;
+      expect(options.approval, label).toEqual(approval);
+      if (state === undefined) {
+        expect(options.callId, label).toBeUndefined();
+      } else {
+        expect(options, label).toMatchObject({ callId: "call_new", oneOffNonce: "nonce-1" });
+      }
     }
   });
 
-  it("asks again, never declines, when the retry carries no answer", async () => {
-    const invokeTool = fakeCore();
-    const channel = toolsChannel();
-    const args = routeArgs({ description: toolsDescription, invokeTool });
-    const first = await rpc(
-      channel,
-      modernRequest("tools/call", { arguments: {}, name: "deploy" }),
-      args,
-    );
-    const again = await rpc(
-      channel,
-      modernRequest("tools/call", {
-        arguments: {},
-        inputResponses: { "dev.eve/approval": { action: "accept", content: {} } },
-        name: "deploy",
-        requestState: first.result?.requestState,
-      }),
-      args,
-    );
-    expect(again.result?.resultType).toBe("input_required");
-    expect(again.result?.requestState).toEqual(expect.any(String));
-    expect(invokeTool.mock.calls[1]![2].approval).toBeUndefined();
-    expect(invokeTool.mock.calls[1]![2].callId).toBe("call_new");
-  });
-
-  it("ignores inputResponses without a requestState", async () => {
-    const invokeTool = fakeCore();
-    const called = await rpc(
-      toolsChannel(),
-      modernRequest("tools/call", {
-        arguments: {},
-        inputResponses: { "dev.eve/approval": { action: "accept", content: { approved: true } } },
-        name: "deploy",
-      }),
-      routeArgs({ description: toolsDescription, invokeTool }),
-    );
-    expect(called.result?.resultType).toBe("input_required");
-    expect(invokeTool.mock.calls[0]![2].approval).toBeUndefined();
-  });
-
-  it("refuses a forged, edited, or rebound requestState with -32602", async () => {
-    const invokeTool = fakeCore();
-    const channel = toolsChannel();
-    const args = routeArgs({ description: toolsDescription, invokeTool });
-    const keyed = { meta: { "dev.eve/tool-session": "k1" } };
-    const first = await rpc(
-      channel,
-      modernRequest("tools/call", { arguments: { env: "prod" }, name: "deploy" }, keyed),
-      args,
-    );
-    const requestState = first.result?.requestState as string;
-    const answer = { "dev.eve/approval": { action: "accept", content: { approved: true } } };
-    const retries: Array<[Record<string, unknown>, ModernCall]> = [
-      [{ arguments: { env: "prod" }, name: "deploy", requestState: `${requestState}x` }, keyed],
-      [{ arguments: { env: "prod" }, name: "deploy", requestState: "v1.e30.AAAA" }, keyed],
-      [{ arguments: { env: "dev" }, name: "deploy", requestState }, keyed],
-      [{ arguments: { env: "prod" }, name: "plain", requestState }, keyed],
-      [
-        { arguments: { env: "prod" }, name: "deploy", requestState },
-        { meta: { "dev.eve/tool-session": "k2" } },
-      ],
-      [{ arguments: { env: "prod" }, name: "deploy", requestState }, {}],
-      [
-        { arguments: { env: "prod" }, name: "deploy", requestState },
-        { ...keyed, headers: { "x-test-principal": "user-2" } },
-      ],
-    ];
-    for (const [params, call] of retries) {
-      const refused = await rpc(
+  it("refuses a forged, edited, expired, or rebound requestState with -32602", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const invokeTool = fakeCore();
+      const channel = toolsChannel();
+      const args = routeArgs({ description: toolsDescription, invokeTool });
+      const keyed = { meta: { "dev.eve/tool-session": "k1" } };
+      const deployArgs = { env: "prod", opts: { a: 1, b: 2 } };
+      const first = await rpc(
         channel,
-        modernRequest("tools/call", { ...params, inputResponses: answer }, call),
+        modernRequest("tools/call", { arguments: deployArgs, name: "deploy" }, keyed),
         args,
       );
-      expect(refused.error).toEqual({
-        code: -32_602,
-        data: { reason: "invalid_request_state" },
-        message: "Invalid or expired requestState",
-      });
+      const requestState = first.result?.requestState as string;
+      const [prefix, body, mac] = requestState.split(".");
+      const envelope = JSON.parse(Buffer.from(body!, "base64url").toString("utf8"));
+      const editedBody = Buffer.from(
+        JSON.stringify({ ...envelope, p: { ...envelope.p, sid: "ts_forged" } }),
+      ).toString("base64url");
+      const retry = (
+        params: Readonly<Record<string, unknown>>,
+        call: ModernCall,
+        target = channel,
+      ): Promise<JsonRpc> =>
+        rpc(
+          target,
+          modernRequest(
+            "tools/call",
+            {
+              arguments: deployArgs,
+              inputResponses: APPROVED,
+              name: "deploy",
+              requestState,
+              ...params,
+            },
+            call,
+          ),
+          args,
+        );
+
+      const refusals: Array<[string, Record<string, unknown>, ModernCall]> = [
+        ["edited MAC", { requestState: `${requestState}x` }, keyed],
+        ["forged", { requestState: "v1.e30.AAAA" }, keyed],
+        ["edited body", { requestState: `${prefix}.${editedBody}.${mac}` }, keyed],
+        ["unsigned", { requestState: `${prefix}.${body}.` }, keyed],
+        ["edited arguments", { arguments: { ...deployArgs, env: "dev" } }, keyed],
+        ["another tool", { name: "plain" }, keyed],
+        ["another tool session", {}, { meta: { "dev.eve/tool-session": "k2" } }],
+        ["no tool session", {}, {}],
+        ["another principal", {}, { ...keyed, headers: { "x-test-principal": "user-2" } }],
+      ];
+      for (const [label, params, call] of refusals) {
+        expect((await retry(params, call)).error, label).toEqual(INVALID_REQUEST_STATE);
+      }
+      const foreign = toolsChannel({ requestStateSecret: "y".repeat(32) });
+      expect((await retry({}, keyed, foreign)).error, "another secret").toEqual(
+        INVALID_REQUEST_STATE,
+      );
+      expect(invokeTool).toHaveBeenCalledTimes(1);
+
+      // Just inside the TTL, a second channel holding only the same secret
+      // accepts the honest retry, whatever order its argument keys arrive in.
+      vi.setSystemTime(Date.now() + 599_000);
+      const accepted = await retry(
+        { arguments: { opts: { b: 2, a: 1 }, env: "prod" } },
+        keyed,
+        toolsChannel(),
+      );
+      expect(accepted.result?.content).toEqual(DEPLOYED);
+      expect(invokeTool.mock.calls[1]![2]).toMatchObject({ callId: "call_new", key: "k1" });
+      expect(invokeTool.mock.calls[1]![2].oneOffNonce).toBeUndefined();
+
+      // Past the 600 s TTL the same retry is refused.
+      vi.setSystemTime(Date.now() + 2_000);
+      expect((await retry({}, keyed)).error, "expired").toEqual(INVALID_REQUEST_STATE);
+      expect(invokeTool).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
     }
-    expect(invokeTool).toHaveBeenCalledTimes(1);
-
-    // A second channel holding only the same secret accepts the honest retry.
-    const other = toolsChannel();
-    const accepted = await rpc(
-      other,
-      modernRequest(
-        "tools/call",
-        { arguments: { env: "prod" }, inputResponses: answer, name: "deploy", requestState },
-        keyed,
-      ),
-      args,
-    );
-    expect(accepted.result?.content).toEqual([{ text: "deployed", type: "text" }]);
-    expect(invokeTool.mock.calls[1]![2]).toMatchObject({ callId: "call_new", key: "k1" });
-    expect(invokeTool.mock.calls[1]![2].oneOffNonce).toBeUndefined();
-
-    // Another secret does not.
-    const foreign = toolsChannel({ requestStateSecret: "y".repeat(32) });
-    const rejected = await rpc(
-      foreign,
-      modernRequest(
-        "tools/call",
-        { arguments: { env: "prod" }, inputResponses: answer, name: "deploy", requestState },
-        keyed,
-      ),
-      args,
-    );
-    expect(rejected.error?.code).toBe(-32_602);
   });
-
   it("asks for each sign-in by URL and retries into the same session", async () => {
     const core = { signedIn: false };
     const invokeTool = fakeCore(core);
@@ -1284,66 +1301,7 @@ describe("mcpChannel tools", () => {
   });
 
   it("never runs a sign-in retry without an accept for every requested connection", async () => {
-    for (const signedIn of [false, true]) {
-      const core = { signedIn: false };
-      const invokeTool = fakeCore(core);
-      const channel = toolsChannel();
-      const args = routeArgs({ description: toolsDescription, invokeTool });
-      const first = await rpc(
-        channel,
-        modernRequest("tools/call", { arguments: {}, name: "issues" }),
-        args,
-      );
-      expect(first.result?.resultType).toBe("input_required");
-      // Before or after the grant exists, an answer is still required.
-      core.signedIn = signedIn;
-      const retry = (requestState: unknown, inputResponses?: unknown) => {
-        const params: Record<string, unknown> = { arguments: {}, name: "issues", requestState };
-        if (inputResponses !== undefined) params.inputResponses = inputResponses;
-        return rpc(channel, modernRequest("tools/call", params), args);
-      };
-
-      for (const unanswered of [
-        undefined,
-        {},
-        { "dev.eve/authorization:other": { action: "accept" } },
-        { "dev.eve/authorization:linear": { action: "maybe" } },
-        { "dev.eve/approval": { action: "accept", content: { approved: true } } },
-      ]) {
-        const again = await retry(first.result?.requestState, unanswered);
-        // Same questions, a fresh state, nothing run.
-        expect(again.result).toMatchObject({
-          _meta: { "dev.eve/authorization": { callId: "call_new", connections: ["linear"] } },
-          inputRequests: first.result?.inputRequests,
-          resultType: "input_required",
-        });
-        expect(decodeState(again.result?.requestState)).toMatchObject({
-          callId: "call_new",
-          kind: "authorization",
-          nonce: "nonce-1",
-          signIns: [{ name: "linear", url: "https://idp.example/a", userCode: "ABCD" }],
-        });
-      }
-      for (const action of ["decline", "cancel"]) {
-        const refused = await retry(first.result?.requestState, {
-          "dev.eve/authorization:linear": { action },
-        });
-        expect(refused.result).toMatchObject({
-          isError: true,
-          structuredContent: { error: { code: "denied" } },
-        });
-      }
-      expect(invokeTool).toHaveBeenCalledTimes(1);
-
-      const accepted = await retry(first.result?.requestState, {
-        "dev.eve/authorization:linear": { action: "accept" },
-      });
-      expect(invokeTool).toHaveBeenCalledTimes(2);
-      expect(accepted.result?.resultType).toBe(signedIn ? "complete" : "input_required");
-    }
-  });
-
-  it("asks again for every connection when only some sign-ins are answered", async () => {
+    // Any retry that reaches the core completes, so one that ran too early shows.
     const invokeTool = vi.fn<InvokeToolFn>(async (_name, _input, options) => {
       if (options.callId !== undefined) {
         return { modelOutput: { type: "text", value: "ok" }, output: "ok", status: "completed" };
@@ -1365,36 +1323,64 @@ describe("mcpChannel tools", () => {
       modernRequest("tools/call", { arguments: {}, name: "issues" }),
       args,
     );
-    const call = (inputResponses: unknown) =>
-      rpc(
-        channel,
-        modernRequest("tools/call", {
-          arguments: {},
-          inputResponses,
-          name: "issues",
-          requestState: first.result?.requestState,
-        }),
-        args,
-      );
-    const partial = await call({ "dev.eve/authorization:linear": { action: "accept" } });
-    expect(Object.keys(partial.result?.inputRequests ?? {})).toEqual([
-      "dev.eve/authorization:linear",
-      "dev.eve/authorization:github",
-    ]);
-    const oneDeclined = await call({
-      "dev.eve/authorization:github": { action: "decline" },
-      "dev.eve/authorization:linear": { action: "accept" },
-    });
-    expect(oneDeclined.result?.structuredContent.error.code).toBe("denied");
+    const retry = (inputResponses?: unknown) => {
+      const params: Record<string, unknown> = {
+        arguments: {},
+        name: "issues",
+        requestState: first.result?.requestState,
+      };
+      if (inputResponses !== undefined) params.inputResponses = inputResponses;
+      return rpc(channel, modernRequest("tools/call", params), args);
+    };
+    const linear = "dev.eve/authorization:linear";
+    const github = "dev.eve/authorization:github";
+    const accept = { action: "accept" };
+
+    for (const unanswered of [
+      undefined,
+      {},
+      { "dev.eve/authorization:other": accept },
+      { [github]: accept, [linear]: { action: "maybe" } },
+      { "dev.eve/approval": { action: "accept", content: { approved: true } } },
+      { [linear]: accept },
+    ]) {
+      const again = await retry(unanswered);
+      const label = JSON.stringify(unanswered) ?? "no inputResponses";
+      // Same questions, a fresh state, nothing run.
+      expect(again.result, label).toMatchObject({
+        _meta: {
+          "dev.eve/authorization": { callId: "call_two", connections: ["linear", "github"] },
+        },
+        inputRequests: first.result?.inputRequests,
+        resultType: "input_required",
+      });
+      expect(Object.keys(again.result?.inputRequests ?? {}), label).toEqual([linear, github]);
+      expect(decodeState(again.result?.requestState), label).toMatchObject({
+        callId: "call_two",
+        kind: "authorization",
+        nonce: "nonce-2",
+        signIns: [
+          { name: "linear", url: "https://idp.example/a" },
+          { name: "github", url: "https://idp.example/b" },
+        ],
+      });
+    }
+    for (const declined of [
+      { [linear]: { action: "decline" } },
+      { [linear]: { action: "cancel" } },
+      { [github]: { action: "decline" }, [linear]: accept },
+    ]) {
+      expect((await retry(declined)).result, JSON.stringify(declined)).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "denied" } },
+      });
+    }
     expect(invokeTool).toHaveBeenCalledTimes(1);
-    const both = await call({
-      "dev.eve/authorization:github": { action: "accept" },
-      "dev.eve/authorization:linear": { action: "accept" },
-    });
+
+    const both = await retry({ [github]: accept, [linear]: accept });
     expect(both.result?.content).toEqual([{ text: "ok", type: "text" }]);
     expect(invokeTool).toHaveBeenCalledTimes(2);
   });
-
   it("carries the approval answer into the sign-in round that follows it", async () => {
     const core = { signedIn: false };
     const invokeTool = fakeCore(core);
@@ -1436,19 +1422,30 @@ describe("mcpChannel tools", () => {
   });
 
   it("refuses input the client cannot render, before minting anything", async () => {
-    const cases: Array<[string, Readonly<Record<string, unknown>>]> = [
-      ["deploy", {}],
-      ["deploy", { elicitation: { url: {} } }],
-      ["issues", { elicitation: {} }],
-      ["issues", { elicitation: { form: {} } }],
+    const call = (name: string, capabilities: Readonly<Record<string, unknown>>) =>
+      modernRequest("tools/call", { arguments: {}, name }, { capabilities });
+    const cases: Array<[string, Request]> = [
+      ["approval without elicitation", call("deploy", {})],
+      ["approval with only url elicitation", call("deploy", { elicitation: { url: {} } })],
+      ["sign-in with bare elicitation", call("issues", { elicitation: {} })],
+      ["sign-in with only form elicitation", call("issues", { elicitation: { form: {} } })],
+      [
+        "the stateless 2025 fallback",
+        mcpRequest({
+          id: 1,
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: { arguments: {}, name: "deploy" },
+        }),
+      ],
     ];
-    for (const [name, capabilities] of cases) {
+    for (const [label, request] of cases) {
       const called = await rpc(
         toolsChannel(),
-        modernRequest("tools/call", { arguments: {}, name }, { capabilities }),
+        request,
         routeArgs({ description: toolsDescription, invokeTool: fakeCore() }),
       );
-      expect(called.result).toMatchObject({
+      expect(called.result, label).toMatchObject({
         isError: true,
         structuredContent: { error: { code: "input_unsupported" } },
       });
@@ -1456,11 +1453,7 @@ describe("mcpChannel tools", () => {
     // A bare `elicitation: {}` implies form mode.
     const bare = await rpc(
       toolsChannel(),
-      modernRequest(
-        "tools/call",
-        { arguments: {}, name: "deploy" },
-        { capabilities: { elicitation: {} } },
-      ),
+      call("deploy", { elicitation: {} }),
       routeArgs({ description: toolsDescription, invokeTool: fakeCore() }),
     );
     expect(bare.result?.resultType).toBe("input_required");
@@ -1475,21 +1468,6 @@ describe("mcpChannel tools", () => {
     expect(called.result).toMatchObject({ isError: true });
     expect(called.result?.structuredContent.error.message).toContain('"linear"');
   });
-
-  it("answers input_unsupported on the stateless 2025 fallback", async () => {
-    const called = await rpc(
-      toolsChannel(),
-      mcpRequest({
-        id: 1,
-        jsonrpc: "2.0",
-        method: "tools/call",
-        params: { arguments: {}, name: "deploy" },
-      }),
-      routeArgs({ description: toolsDescription, invokeTool: fakeCore() }),
-    );
-    expect(called.result?.structuredContent.error.code).toBe("input_unsupported");
-  });
-
   it("without a secret in production, fails paused calls naming the env var and runs plain ones", async () => {
     const previous = { env: process.env.EVE_MCP_REQUEST_STATE_SECRET, dev: process.env.EVE_DEV };
     delete process.env.EVE_MCP_REQUEST_STATE_SECRET;
@@ -1530,43 +1508,171 @@ describe("mcpChannel tools", () => {
     }
   });
 
-  it("calls as the forwarded principal, with the forwarder in the session id", async () => {
-    const invokeTool = fakeCore();
-    const channel = toolsChannel({ trustedForwarders: () => true });
-    const args = routeArgs({ description: toolsDescription, invokeTool });
-    const header = Buffer.from(
-      JSON.stringify({
-        current: {
-          attributes: {},
-          authenticator: "oidc",
-          principalId: "end-user",
-          principalType: "user",
-        },
-      }),
-    ).toString("base64url");
-    const forwarded = {
-      headers: { "eve-forwarded-principal": header, "x-test-principal": "router" },
+  it("resolves eve-forwarded-principal before any MCP handling, then calls as the forwarded principal", async () => {
+    const endUser: SessionAuthContext = {
+      attributes: { team: "équipe" },
+      authenticator: "oidc",
+      principalId: "end-user",
+      principalType: "user",
     };
+    const encode = (text: string) => Buffer.from(text).toString("base64url");
+    const valid = encode(JSON.stringify({ current: endUser }));
+    // Unpadded base64url of 12,288 bytes is exactly the 16 KiB cap; the
+    // padding is JSON whitespace, so only the cap can refuse the larger one.
+    const sized = (bytes: number) => {
+      const json = JSON.stringify({ current: endUser });
+      return encode(json + " ".repeat(bytes - Buffer.byteLength(json)));
+    };
+    const rows: Array<{
+      readonly label: string;
+      readonly header?: string;
+      /** The `trustedForwarders` verdict; omitted for a channel without one. */
+      readonly trusted?: boolean;
+      readonly anonymous?: true;
+      /** An HTTP status, or the principal the tool runs as. */
+      readonly expected: number | string;
+      readonly message?: string;
+      readonly consulted: boolean;
+    }> = [
+      {
+        consulted: false,
+        expected: "router",
+        header: "%%%",
+        label: "no trustedForwarders ignores even a malformed header",
+      },
+      { consulted: false, expected: "router", label: "no header", trusted: true },
+      {
+        anonymous: true,
+        consulted: false,
+        expected: 403,
+        header: valid,
+        label: "an anonymous caller cannot forward",
+        trusted: true,
+      },
+      {
+        consulted: false,
+        expected: 400,
+        header: `${valid}=`,
+        label: "padded",
+        message: "unpadded base64url",
+        trusted: true,
+      },
+      {
+        consulted: false,
+        expected: 400,
+        header: "not base64!",
+        label: "not base64url",
+        message: "unpadded base64url",
+        trusted: true,
+      },
+      {
+        consulted: false,
+        expected: 400,
+        header: Buffer.from([0xff, 0xfe]).toString("base64url"),
+        label: "not UTF-8",
+        message: "UTF-8 JSON",
+        trusted: true,
+      },
+      {
+        consulted: false,
+        expected: 400,
+        header: encode("{not json"),
+        label: "not JSON",
+        message: "UTF-8 JSON",
+        trusted: true,
+      },
+      {
+        consulted: false,
+        expected: 400,
+        header: encode(JSON.stringify({ current: { principalId: "x" } })),
+        label: "not a principal",
+        trusted: true,
+      },
+      {
+        consulted: false,
+        expected: 400,
+        header: sized(12_289),
+        label: "over 16 KiB",
+        message: "at most 16384 bytes",
+        trusted: true,
+      },
+      {
+        consulted: true,
+        expected: 403,
+        header: valid,
+        label: "refused by trustedForwarders",
+        trusted: false,
+      },
+      {
+        consulted: true,
+        expected: "end-user",
+        header: sized(12_288),
+        label: "accepted at the 16 KiB cap",
+        trusted: true,
+      },
+    ];
+    for (const row of rows) {
+      const trustedForwarders = vi.fn(() => row.trusted ?? false);
+      const invokeTool = fakeCore();
+      const forwarders = {
+        trustedForwarders: row.trusted === undefined ? undefined : trustedForwarders,
+      };
+      const channel = toolsChannel(row.anonymous ? { ...forwarders, auth: none() } : forwarders);
+      const headers: Record<string, string> = { "x-test-principal": "router" };
+      if (row.header !== undefined) headers["eve-forwarded-principal"] = row.header;
+      const response = await postHandler(channel)(
+        modernRequest("tools/call", { arguments: { x: 1 }, name: "plain" }, { headers }),
+        routeArgs({ description: toolsDescription, invokeTool }),
+      );
+      expect(trustedForwarders.mock.calls.length > 0, row.label).toBe(row.consulted);
+      if (typeof row.expected === "number") {
+        expect(response.status, row.label).toBe(row.expected);
+        const { error } = (await response.json()) as { error: string };
+        if (row.message !== undefined) expect(error, row.label).toContain(row.message);
+        expect(invokeTool, row.label).not.toHaveBeenCalled();
+      } else {
+        expect(response.status, row.label).toBe(200);
+        expect(invokeTool.mock.calls[0]![2].auth.principalId, row.label).toBe(row.expected);
+      }
+    }
+
+    const invokeTool = fakeCore();
+    const trustedForwarders = vi.fn(() => true);
+    const channel = toolsChannel({ trustedForwarders });
+    const args = routeArgs({ description: toolsDescription, invokeTool });
     const first = await rpc(
       channel,
-      modernRequest("tools/call", { arguments: {}, name: "deploy" }, forwarded),
+      modernRequest(
+        "tools/call",
+        { arguments: {}, name: "deploy" },
+        { headers: { "eve-forwarded-principal": valid, "x-test-principal": "router" } },
+      ),
       args,
     );
+    const stamped = {
+      ...endUser,
+      attributes: { ...endUser.attributes, "eve:forwarded-by": "router" },
+    };
     expect(invokeTool.mock.calls[0]![2]).toMatchObject({
-      auth: { attributes: { "eve:forwarded-by": "router" }, principalId: "end-user" },
+      auth: stamped,
       forwarder: { principalId: "router" },
-      initiator: { principalId: "end-user" },
+      initiator: stamped,
     });
+    expect(trustedForwarders).toHaveBeenCalledWith(
+      expect.objectContaining({ principalId: "router" }),
+      {
+        principal: { current: stamped, initiator: stamped },
+      },
+    );
 
     // The same state replayed by the same user without the forwarder is refused.
-    const answer = { "dev.eve/approval": { action: "accept", content: { approved: true } } };
     const replayed = await rpc(
       channel,
       modernRequest(
         "tools/call",
         {
           arguments: {},
-          inputResponses: answer,
+          inputResponses: APPROVED,
           name: "deploy",
           requestState: first.result?.requestState,
         },
@@ -1574,33 +1680,116 @@ describe("mcpChannel tools", () => {
       ),
       args,
     );
-    expect(replayed.error?.code).toBe(-32_602);
-
-    const malformed = await postHandler(channel)(
-      modernRequest("server/discover", {}, { headers: { "eve-forwarded-principal": "!!" } }),
-      args,
-    );
-    expect(malformed.status).toBe(400);
+    expect(replayed.error).toEqual(INVALID_REQUEST_STATE);
   });
 
-  it("acknowledges subscriptions/listen, then closes the stream without a result", async () => {
-    const response = await postHandler(toolsChannel())(
-      modernRequest("subscriptions/listen", {
-        notifications: { promptsListChanged: true, toolsListChanged: true },
-      }),
-      routeArgs({ description: toolsDescription }),
+  it("serves skills only with skills: true, beside the tools", async () => {
+    const args = routeArgs({ description: skillsDescription, invokeTool: fakeCore(), readSkill });
+    const entry = "skill://usage-triage/SKILL.md";
+    for (const skills of [undefined, true]) {
+      const label = `skills: ${skills}`;
+      const channel = toolsChannel(skills === undefined ? {} : { skills });
+      const discovered = await rpc(channel, modernRequest("server/discover"), args);
+      const tools = await rpc(channel, modernRequest("tools/list"), args);
+      const listed = await rpc(channel, modernRequest("skills/list"), args);
+      const read = await rpc(
+        channel,
+        modernRequest("resources/read", { uri: entry }, { headers: { "mcp-name": entry } }),
+        args,
+      );
+      expect(
+        tools.result?.tools.map((tool: { name: string }) => tool.name),
+        label,
+      ).toEqual([...AGENT_TOOL_NAMES, "deploy", "issues", "plain"]);
+      if (skills === true) {
+        expect(discovered.result?.capabilities, label).toMatchObject({
+          extensions: {
+            "dev.eve/tool-sessions": {},
+            "io.modelcontextprotocol/skills": { directoryRead: true },
+          },
+          resources: { listChanged: true, subscribe: true },
+        });
+        expect(listed.result?.skills.map((skill: { uri: string }) => skill.uri)).toEqual([entry]);
+        expect(read.result?.contents).toEqual([
+          { mimeType: "text/markdown", text: SKILL_MD, uri: entry },
+        ]);
+      } else {
+        expect(discovered.result?.capabilities.resources, label).toBeUndefined();
+        expect(
+          discovered.result?.capabilities.extensions?.["io.modelcontextprotocol/skills"],
+          label,
+        ).toBeUndefined();
+        expect(listed.error?.code, label).toBe(-32_601);
+        expect(read.error?.code, label).toBe(-32_601);
+      }
+    }
+  });
+
+  it("acknowledges subscriptions/listen with only what it serves, then closes the stream", async () => {
+    const served = "skill://usage-triage/references/runbook.md";
+    const entry = "skill://usage-triage/SKILL.md";
+    const missing = (index: number) => `skill://usage-triage/missing-${index}.md`;
+    const hundred = [served, ...Array.from({ length: 99 }, (_, index) => missing(index))];
+    const rows: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+      [
+        "unserved list kinds are dropped",
+        { promptsListChanged: true, toolsListChanged: true },
+        { toolsListChanged: true },
+      ],
+      [
+        "only served skill files, once each",
+        {
+          resourceSubscriptions: [
+            served,
+            entry,
+            served,
+            missing(0),
+            "skill://nope/SKILL.md",
+            "skill://usage-triage",
+            "skill://usage-triage/references",
+            "https://example.com/x",
+            "skill://usage-triage/../SKILL.md",
+          ],
+          resourcesListChanged: true,
+        },
+        { resourceSubscriptions: [served, entry], resourcesListChanged: true },
+      ],
+      ["nothing readable", { resourceSubscriptions: ["skill://nope/SKILL.md"] }, {}],
+      [
+        "exactly 100 subscriptions",
+        { resourceSubscriptions: hundred },
+        { resourceSubscriptions: [served] },
+      ],
+    ];
+    const channel = toolsChannel({ skills: true });
+    const listen = (notifications: Record<string, unknown>, args: RouteHandlerArgs) =>
+      postHandler(channel)(modernRequest("subscriptions/listen", { notifications }), args);
+    for (const [label, notifications, acknowledged] of rows) {
+      const response = await listen(
+        notifications,
+        routeArgs({ description: skillsDescription, readSkill }),
+      );
+      expect(response.headers.get("content-type"), label).toContain("text/event-stream");
+      const events = (await response.text())
+        .split("\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice("data: ".length)));
+      expect(events, label).toEqual([
+        expect.objectContaining({
+          method: "notifications/subscriptions/acknowledged",
+          params: expect.objectContaining({ notifications: acknowledged }),
+        }),
+      ]);
+    }
+
+    // 101 is refused as a JSON error before any skill file is read.
+    const reads = vi.fn(readSkill);
+    const over = await listen(
+      { resourceSubscriptions: [...hundred, missing(99)] },
+      routeArgs({ description: skillsDescription, readSkill: reads }),
     );
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
-    const text = await response.text();
-    const events = text
-      .split("\n")
-      .filter((line) => line.startsWith("data: "))
-      .map((line) => JSON.parse(line.slice(6)));
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      method: "notifications/subscriptions/acknowledged",
-      params: { notifications: { toolsListChanged: true } },
-    });
-    expect(events[0].params.notifications.promptsListChanged).toBeUndefined();
+    expect(over.headers.get("content-type")).toContain("application/json");
+    expect(await over.json()).toMatchObject({ error: { code: -32_602 }, id: 1 });
+    expect(reads).not.toHaveBeenCalled();
   });
 });

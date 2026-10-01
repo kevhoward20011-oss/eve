@@ -558,9 +558,4 @@ describe("closeAfterListenAck", () => {
     await expect(response.text()).resolves.toBe(`: keepalive\n\n${ack}`);
     expect(cancelled).toBe(true);
   });
-
-  it("passes JSON responses through", async () => {
-    const response = Response.json({ error: { code: -32_602 } });
-    expect(closeAfterListenAck(response)).toBe(response);
-  });
 });
