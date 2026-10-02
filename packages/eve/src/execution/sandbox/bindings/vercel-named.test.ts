@@ -47,5 +47,9 @@ it.each([
   const rejection = named.create(context, undefined, { snapshotId: "snap" }, address);
 
   if (conflict) await expect(rejection).rejects.toBeInstanceOf(SandboxNameConflictError);
-  else await expect(rejection).rejects.not.toBeInstanceOf(SandboxNameConflictError);
+  else {
+    await expect(rejection).rejects.toThrow(
+      'Failed to open Vercel sandbox session "ts_abc": Status code 400 is not ok: invalid runtime',
+    );
+  }
 });

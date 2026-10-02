@@ -770,7 +770,7 @@ describe("mcpChannel tools", () => {
     }
   });
 
-  it("agent: false serves only what tools and skills publish and frees the agent_* names", async () => {
+  it("reserves the agent_* names while agent is on, and frees them with agent: false", async () => {
     const core = fakeCore();
     const description: AgentDescription = {
       ...toolsDescription,
@@ -786,6 +786,11 @@ describe("mcpChannel tools", () => {
       ],
     };
     const args = routeArgs({ description, invokeTool: core, readSkill });
+
+    const reserved = (await rpc(toolsChannel(), modernRequest("tools/list", {}), args)).result;
+    const starts = reserved.tools.filter((t: { name: string }) => t.name === "agent_start");
+    expect(starts).toHaveLength(1);
+    expect(starts[0].description).not.toBe("An authored tool named like the channel's.");
 
     const toolsOnly = toolsChannel({ agent: false });
     const discovered = (await rpc(toolsOnly, modernRequest("server/discover", {}), args)).result;
@@ -856,6 +861,17 @@ describe("mcpChannel tools", () => {
       vi.setSystemTime(Date.now() + 2_000);
       expect((await retry({}, keyed)).error, "expired").toMatchObject(INVALID_STATE);
       expect(core).toHaveBeenCalledTimes(2);
+
+      // A sign-in round sent again for a partial answer keeps the first expiry.
+      const issues = (requestState?: string) =>
+        rpc(channel, callTool({ name: "issues", requestState }, keyed), args);
+      const asked = (await issues()).result.requestState;
+      vi.setSystemTime(Date.now() + 599_000);
+      const resent = (await issues(asked)).result.requestState;
+      expect(resent).not.toBe(asked);
+      vi.setSystemTime(Date.now() + 2_000);
+      expect((await issues(resent)).error, "re-sent").toMatchObject(INVALID_STATE);
+      expect(core).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
     }
@@ -994,7 +1010,7 @@ describe("mcpChannel tools", () => {
     //  status or principal, verdict consulted, error substring, anonymous caller]
     type Row = [string, string?, boolean?, (number | string)?, boolean?, string?, boolean?];
     const rows: Row[] = [
-      ["no trustedForwarders ignores even a malformed header", "%%%", undefined, "router"],
+      ["no trustedForwarders refuses any header", "%%%", undefined, 403, false, "does not accept"],
       ["no header", undefined, true, "router"],
       ["an anonymous caller cannot forward", valid, true, 403, false, undefined, true],
       ["padded", `${valid}=`, true, 400, false, "unpadded base64url"],
@@ -1058,11 +1074,7 @@ describe("mcpChannel tools", () => {
       "skill://usage-triage/../SKILL.md",
     ];
     const rows: Array<[string, object, object]> = [
-      [
-        "unserved kinds",
-        { promptsListChanged: true, toolsListChanged: true },
-        { toolsListChanged: true },
-      ],
+      ["unserved kinds", { promptsListChanged: true, toolsListChanged: true }, {}],
       [
         "served files, once",
         { resourceSubscriptions: subscribed },

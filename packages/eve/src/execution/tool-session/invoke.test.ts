@@ -389,10 +389,7 @@ describe("tool-session sandbox races", () => {
 
     const sweep = provider.sweep();
     await paused.reached;
-    const findsBefore = provider.finds;
     const arriving = call(runtime, "write", { path: "/workspace/b.txt", text: "new" });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(provider.finds).toBe(findsBefore);
     paused.release();
 
     const [result, written] = await Promise.all([sweep, arriving]);

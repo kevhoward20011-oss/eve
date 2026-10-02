@@ -35,10 +35,7 @@ describe("deriveToolSessionId", () => {
 });
 
 it("accepts tool session keys of 1 to 512 characters", () => {
-  expect(["", "k", "k".repeat(512), "k".repeat(513)].map(validateToolSessionKey)).toEqual([
-    expect.any(String),
-    undefined,
-    undefined,
-    expect.any(String),
-  ]);
+  expect(
+    ["", "k", "k".repeat(512), "k".repeat(513)].map((key) => validateToolSessionKey(key)),
+  ).toEqual([expect.any(String), undefined, undefined, expect.any(String)]);
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { ContextContainer, contextStorage } from "#context/container.js";
-import { CapabilitiesKey } from "#context/keys.js";
+import { AuthKey, CapabilitiesKey } from "#context/keys.js";
 import { ConnectionRegistryKey } from "#context/providers/connection-key.js";
 import {
   loadRemoteInputContinuations,
@@ -39,7 +39,8 @@ const signal = (approve: RemoteInputRetry) =>
 
 function setup(input: {
   readonly executeTool: () => Promise<unknown>;
-  readonly requestInput: boolean;
+  readonly requestInput?: boolean;
+  readonly principalType?: "anonymous" | "user";
 }) {
   const executeTool = vi.fn(input.executeTool);
   const client: ConnectionClient = {
@@ -64,7 +65,13 @@ function setup(input: {
   };
   const ctx = new ContextContainer();
   ctx.set(ConnectionRegistryKey, registry);
-  ctx.set(CapabilitiesKey, { requestInput: input.requestInput } as never);
+  ctx.set(CapabilitiesKey, { requestInput: input.requestInput ?? true } as never);
+  ctx.set(AuthKey, {
+    attributes: {},
+    authenticator: "test",
+    principalId: "alice",
+    principalType: input.principalType ?? "user",
+  });
   const run = (callId: string) =>
     contextStorage.run(ctx, async () => {
       const tool = resolveConnectionTools()![CONNECTION_EXECUTE_TOOL_NAME]!;
@@ -129,7 +136,7 @@ describe("connection_execute retry and ask bounds", () => {
       "needs input eve cannot ask for: it sent a URL elicitation without an http(s) URL.",
     ],
   ])("%s", async (_label, reply, asked, calls, expected) => {
-    const { ctx, executeTool, run } = setup({ executeTool: async () => reply, requestInput: true });
+    const { ctx, executeTool, run } = setup({ executeTool: async () => reply });
     if (asked !== undefined) {
       approveContinuation(ctx, "call_1", { attempt: asked, inputResponses: {}, requestState: "s" });
     }
@@ -140,6 +147,18 @@ describe("connection_execute retry and ask bounds", () => {
       await expect(outcome).rejects.toThrow(`billing__refund ${expected}`);
     else expect(((await outcome) as RemoteInputSignal).approve).toMatchObject(expected);
     expect(executeTool).toHaveBeenCalledTimes(calls);
+  });
+
+  // Nobody could answer, so the call fails before parking anything.
+  it.each([
+    [{ requestInput: false }, "this session cannot ask anyone, such as a scheduled run."],
+    [{ principalType: "anonymous" as const }, "only a signed-in user can answer"],
+  ])("fails without asking for %o", async (options, expected) => {
+    const { executeTool, run } = setup({ executeTool: async () => signInUrl, ...options });
+    await expect(run("call_1")).rejects.toThrow(
+      `billing__refund needs the user to sign in, but ${expected}`,
+    );
+    expect(executeTool).toHaveBeenCalledTimes(1);
   });
 
   // Each re-ask of a resumed call is a new request, numbered after the

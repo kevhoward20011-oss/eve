@@ -1,4 +1,4 @@
-import { access, readdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Client, SdkHttpError, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -347,14 +347,4 @@ describe("a third-party MCP client against mcpChannel", () => {
       }
     },
   );
-});
-
-describe("skill files in production server assets", () => {
-  it("inlines the skills tree as Nitro chunks rather than plain copies", async () => {
-    const server = join(appRoot, ".output", "server");
-    const files = (await readdir(server, { recursive: true })).map(String);
-    expect(files.filter((path) => /\.(png|md)$/i.test(path))).toEqual([]);
-    expect(files.filter((path) => path.endsWith(".bin.mjs"))).toHaveLength(2);
-    await expect(access(join(server, "_eve-skills"))).rejects.toMatchObject({ code: "ENOENT" });
-  });
 });

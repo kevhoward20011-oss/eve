@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createMcpInputRequiredFetch,
+  parseInputRequiredResult,
   planMcpInput,
   runMcpRequestScope,
 } from "#runtime/connections/mcp-input-required.js";
@@ -181,3 +182,24 @@ async function sdkCall(fetcher: typeof fetch, body: string): Promise<unknown> {
   if (text.includes("input_required")) throw new Error("SDK: unknown result");
   return text;
 }
+
+// What an untrusted server sends lands in session state and the user's prompt.
+it("refuses input_required content over its caps", () => {
+  const elicit = (params: object) => ({ method: "elicitation/create", params });
+  const many = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`r${i}`, elicit({})]));
+  const rows: Array<[Record<string, unknown>, string | undefined]> = [
+    [{ requestState: "s".repeat(64 * 1024) }, undefined],
+    [{ requestState: "s".repeat(64 * 1024 + 1) }, "requestState over 65536"],
+    [{ inputRequests: many }, "more than 16 inputRequests"],
+    [{ inputRequests: { a: elicit({ message: "m".repeat(8 * 1024 + 1) }) } }, "message over 8192"],
+    [
+      { inputRequests: { a: elicit({ url: `https://x/${"u".repeat(8 * 1024)}` }) } },
+      "url over 8192",
+    ],
+  ];
+  for (const [result, refused] of rows) {
+    const parsed = parseInputRequiredResult(result);
+    if (refused === undefined) expect(typeof parsed).toBe("object");
+    else expect(parsed).toContain(refused);
+  }
+});

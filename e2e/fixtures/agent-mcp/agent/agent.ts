@@ -9,13 +9,6 @@ const PENDING_REMOTE_INPUT = "Waiting for the user to answer";
 
 /** One scripted call per directive, with a stable id so later steps find its result. */
 function directiveCall(message: string): MockModelToolCall | undefined {
-  if (message.includes("MCP_LIST_TOOLS")) {
-    return {
-      id: "mcp-list",
-      input: { connection: LOOPBACK_CONNECTION, limit: 50, query: "" },
-      name: "connection_search",
-    };
-  }
   if (message.includes("MCP_WHOAMI")) {
     return {
       id: "mcp-whoami",

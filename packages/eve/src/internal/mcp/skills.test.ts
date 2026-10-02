@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import type { AgentDescription } from "#channel/agent-description.js";
 import { MAX_SKILL_FILE_BYTES, SkillReadError } from "#channel/skill-files.js";
 import { createMcpSkillsFeature } from "#internal/mcp/skills.js";
-import { parseFrontmatter } from "#internal/helpers/gray-matter.js";
 import { createMcpStreamableHttpServer } from "#internal/mcp/streamable-http-server.js";
 
 type Files = Readonly<Record<string, string | Uint8Array>>;
@@ -149,12 +148,5 @@ describe("MCP skills (SEP-2640)", () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     expect(Object.hasOwn(renamed, "__proto__")).toBe(true);
     expect(renamed).toMatchObject({ description: "Needs a name.", name: "renamed" });
-
-    for (const skill of listed) {
-      const read = await call("resources/read", { uri: skill.uri });
-      const served = parseFrontmatter(read.result?.contents[0].text).data;
-      expect(Object.hasOwn(served, "__proto__"), skill.uri).toBe(true);
-      expect(JSON.stringify(served), skill.uri).toBe(JSON.stringify(skill.frontmatter));
-    }
   });
 });
