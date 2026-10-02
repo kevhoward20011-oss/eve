@@ -37,8 +37,10 @@ export interface McpClientConnectionDefinition {
   /**
    * Whether to forward the calling turn's principals to the server in the
    * `eve-forwarded-principal` header, so an eve agent's `mcpChannel` can run
-   * the call as that user. The server adopts them only when its
-   * `trustedForwarders` predicate trusts this deployment. Defaults to `false`.
+   * the call as that user. The server must set `trustedForwarders` and trust
+   * this deployment; otherwise it refuses the request with `403`. A request
+   * carrying the header fails rather than follow a redirect.
+   * @default false
    */
   readonly forwardPrincipal?: boolean;
   /**

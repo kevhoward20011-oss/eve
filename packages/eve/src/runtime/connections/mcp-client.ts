@@ -163,7 +163,10 @@ export class McpConnectionClient implements ConnectionClient {
         FORWARDED_PRINCIPAL_HEADER,
         encodeForwardedPrincipalHeader(principal, connectionName),
       );
-      return await base(request, { ...init, headers });
+      // Fetch keeps custom headers across a cross-origin redirect, unlike
+      // `Authorization`, so a redirect would hand the user's identity to
+      // another host. Fail instead of following one.
+      return await base(request, { ...init, headers, redirect: "error" });
     };
   }
 

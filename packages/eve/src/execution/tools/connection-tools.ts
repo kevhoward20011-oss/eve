@@ -18,6 +18,7 @@ import { planMcpInput, type McpSignInLink } from "#runtime/connections/mcp-input
 import { ConnectionRegistryKey } from "#context/providers/connection-key.js";
 import { getAuthorizationResults, type AuthorizationSignal } from "#harness/authorization.js";
 import { reportNestedToolAction } from "#harness/nested-actions.js";
+import { currentRequester } from "#harness/pending-input-batches.js";
 import { createLogger } from "#internal/logging.js";
 import type { ConnectionRegistry } from "#runtime/connections/registry-types.js";
 import { resolveConnectionAuthorization } from "#runtime/connections/resolve-authorization.js";
@@ -424,11 +425,18 @@ async function executeConnectionTool(
       inputRetry = { requestState: raw.requestState, resolvedArguments: raw.resolvedArguments };
       continue;
     }
-    // No person can answer this run (a schedule, an unattended caller).
-    if (loadContext().get(CapabilitiesKey)?.requestInput !== true) {
+    // No person can answer this run (a schedule, an unattended caller), or no
+    // answer could be attributed to one (an anonymous session).
+    const cannotAsk =
+      loadContext().get(CapabilitiesKey)?.requestInput !== true
+        ? "this session cannot ask anyone, such as a scheduled run"
+        : currentRequester() === null
+          ? "only a signed-in user can answer, and this session is anonymous"
+          : undefined;
+    if (cannotAsk !== undefined) {
       return fail(
         `${toolName} needs the user to ${plan.kind === "sign-in" ? "sign in" : "approve it"}, ` +
-          "but this session cannot ask anyone, such as a scheduled run.",
+          `but ${cannotAsk}.`,
       );
     }
     if (++attempt > MAX_REMOTE_INPUT_ASKS) {

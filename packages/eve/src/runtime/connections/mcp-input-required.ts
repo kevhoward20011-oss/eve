@@ -26,6 +26,12 @@ import { isObject } from "#shared/guards.js";
 /** JSON-RPC methods a server may answer with `input_required` (MCP 2026-07-28). */
 const MRTR_METHODS: ReadonlySet<string> = new Set(["prompts/get", "resources/read", "tools/call"]);
 
+// The server is untrusted, and what it sends is stored in session state and
+// shown to the user, so every piece of it is capped.
+const MAX_REQUEST_STATE_LENGTH = 64 * 1024;
+const MAX_INPUT_REQUESTS = 16;
+const MAX_INPUT_TEXT_LENGTH = 8 * 1024;
+
 /** One server-initiated request inside `inputRequests`, such as `elicitation/create`. */
 export interface McpInputRequest {
   readonly method: string;
@@ -289,6 +295,9 @@ export function parseInputRequiredResult(
   if (requestState !== undefined && typeof requestState !== "string") {
     return "The MCP server returned input_required with a non-string requestState.";
   }
+  if (requestState !== undefined && requestState.length > MAX_REQUEST_STATE_LENGTH) {
+    return `The MCP server returned input_required with a requestState over ${MAX_REQUEST_STATE_LENGTH} characters.`;
+  }
   if (inputRequests === undefined) {
     return requestState === undefined
       ? "The MCP server returned input_required without inputRequests or requestState."
@@ -296,6 +305,9 @@ export function parseInputRequiredResult(
   }
   if (!isObject(inputRequests)) {
     return "The MCP server returned input_required with malformed inputRequests.";
+  }
+  if (Object.keys(inputRequests).length > MAX_INPUT_REQUESTS) {
+    return `The MCP server returned input_required with more than ${MAX_INPUT_REQUESTS} inputRequests.`;
   }
   // Request ids are server-chosen keys: a null-prototype map keeps an id like
   // `__proto__` an ordinary entry instead of a prototype write.
@@ -307,6 +319,12 @@ export function parseInputRequiredResult(
     const params = entry["params"];
     if (params !== undefined && !isObject(params)) {
       return `The MCP server returned input_required with malformed params for "${key}".`;
+    }
+    for (const field of ["message", "url"] as const) {
+      const text = params?.[field];
+      if (typeof text === "string" && text.length > MAX_INPUT_TEXT_LENGTH) {
+        return `The MCP server returned input_required with a ${field} over ${MAX_INPUT_TEXT_LENGTH} characters for "${key}".`;
+      }
     }
     requests[key] =
       params === undefined ? { method: entry["method"] } : { method: entry["method"], params };
