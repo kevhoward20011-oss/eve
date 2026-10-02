@@ -443,14 +443,17 @@ describe("remote input responder rules", () => {
     ["plain, in a turn with no user", plain, null, "denied", CLOSED],
     ["typed approve, caller", typed(responder), null, "approved"],
     ["typed cancel, caller", typed(responder, "cancel"), null, "denied"],
-    ["typed approve, other user", typed(other), null, "pending"],
-    ["typed unattributed, in another user's turn", { message: "approve" }, other, "pending"],
-    ["typed approve naming nobody, in the caller's turn", typed(null), responder, "pending"],
+    // A typed message that is not the caller's answer moves the turn on, so
+    // the held request is ignored and nothing runs. On a held turn another
+    // person's message queues instead of reaching this step.
+    ["typed approve, other user", typed(other), null, "denied"],
+    ["typed unattributed, in another user's turn", { message: "approve" }, other, "denied"],
+    ["typed approve naming nobody, in the caller's turn", typed(null), responder, "denied"],
     [
       "attributed and typed, other user",
       { ...attributed(other), ...typed(other) },
       null,
-      "pending",
+      "denied",
       REFUSED,
     ],
   ])("%s: %s", async (_label, stepInput, turn, outcome, feedback, caller = responder) => {

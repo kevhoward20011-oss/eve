@@ -15,9 +15,8 @@ const as = (user: string) => ({ headers: { [USER_HEADER]: user } });
  * The channel's approval reaches the calling session's user as an ordinary
  * `input.requested`, and only that user can answer it.
  *
- * In this checkout the call parks the turn and resumes on the answer through
- * `input.requested`. PR #4135 (held turns) will change that lifecycle; update
- * the parking and resumption assertions here when it lands.
+ * The approval holds the calling turn (`turn.waiting` on `input`); a refused
+ * answer leaves it held, and the requester's answer resumes the same turn.
  */
 export default defineEval({
   description:
@@ -51,10 +50,11 @@ export default defineEval({
     const request = session.requireInputRequest({ toolName: "connection_execute" });
     const answer = [{ optionId: "approve", requestId: request.requestId }];
 
-    // Bob is on the same thread and tries to approve Alice's notice. The
-    // refusal is reported without a new turn boundary, so watch for it live.
-    const bob = await session.startRespond(answer, as("bob"));
-    await bob.waitForEvent("message.completed", { data: { message: REFUSED } });
+    // Bob is on the same thread and tries to approve Alice's notice. He is
+    // refused, and the turn stays held for Alice.
+    const bob = await session.respond(answer, as("bob"));
+    bob.event("message.completed", { data: { message: REFUSED } });
+    bob.event("turn.waiting", { data: { on: "input" } });
     await t.require(bob.events.filter((event) => event.type === "action.result").length, equals(0));
 
     // The request stayed pending: Alice's answer to the same request id runs
