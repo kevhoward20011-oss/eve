@@ -73,6 +73,33 @@ describe("openStreamBody", () => {
       EVE_STREAM_CONTROL_VERSION,
     );
   });
+
+  it.each(["Load failed", "NetworkError when attempting to fetch resource."])(
+    "retries a browser network error while opening a stream: %s",
+    async (message) => {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockRejectedValueOnce(new TypeError(message))
+        .mockResolvedValue(
+          new Response("", {
+            headers: { [EVE_STREAM_VERSION_HEADER]: EVE_MESSAGE_STREAM_VERSION },
+            status: 200,
+          }),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const connection = await openStreamBody({
+        host: "https://agent.example",
+        resolveHeaders: () => Promise.resolve(new Headers()),
+        path: "/eve/v1/session/session_1/stream",
+        startIndex: 0,
+        streamReconnectPolicy: { streamOpenReconnectPolicy: { baseDelayMs: 1, maxAttempts: 2 } },
+      });
+      connection.close();
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
 });
 
 describe("followStreamIterable", () => {
