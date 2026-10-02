@@ -461,7 +461,7 @@ describe("SessionExecution checkpoints", () => {
     },
   );
   it("cancels an admitted workflow action when cancellation already arrived at the step boundary", async () => {
-    const sessionState = state("");
+    const sessionState = stateWithBlockingRun();
     const inbox: SessionInbox = {
       claimedTokens: [],
       claimSessionHook: vi.fn(),
@@ -1299,7 +1299,7 @@ describe("SessionExecution checkpoints", () => {
 
   it("announces a child opened before a cancel ahead of cancelling the turn's work", async () => {
     const { inbox, planner } = boundaryRunMessages();
-    const sessionState = state("");
+    const sessionState = stateWithBlockingRun();
     let interrupt: (payload: SessionInboxPayload) => void = () => {};
     inbox.onInterrupt = (handler) => {
       interrupt = handler;
@@ -1441,6 +1441,22 @@ function createExecution(input: {
     queue: input.queue ?? new SessionInputQueue(),
     sessionId: input.sessionState.sessionId,
   });
+}
+
+/** A session whose turn waits on a workflow tool run, so cancelling it has a run to cancel. */
+function stateWithBlockingRun(): DurableSessionState {
+  const base = state("");
+  return {
+    ...base,
+    snapshot: {
+      session: registerWorkflowToolRun(base.snapshot.session, {
+        address: { hookToken: "hold-control", runId: "hold-run" },
+        callId: "hold-call",
+        origin: { stepIndex: 0, turnId: "turn_0" },
+        toolName: "hold",
+      }),
+    },
+  };
 }
 
 function state(continuationToken: string): DurableSessionState {

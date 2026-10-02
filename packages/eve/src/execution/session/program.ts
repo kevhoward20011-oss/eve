@@ -8,7 +8,7 @@ import {
 import type { DurableSessionState } from "#execution/durable-session-store.js";
 import type { HarnessModelMessage } from "#harness/messages.js";
 import { nextTurnDelivery, type NextTurnInstruction } from "#execution/session/next-input.js";
-import { cancelDescendantTurnsStep } from "#execution/cancel-descendant-turns-step.js";
+import { cancelDescendantTurns } from "#execution/cancel-descendant-turns.js";
 import { SessionInputQueue } from "#execution/session/input-queue.js";
 import { SessionExecution } from "#execution/session/turn.js";
 import { SessionStateCursor } from "#execution/session/state-cursor.js";
@@ -18,7 +18,10 @@ import type { TurnOutcome, TurnStepPayload } from "#execution/session/turn-step-
 import { settleCancelledTurnStep } from "#execution/settle-cancelled-turn-step.js";
 import { finalizeSession, type SessionTerminalOutcome } from "#execution/session/finalization.js";
 import { type SessionInboxHandle } from "#execution/session-inbox/inbox.js";
-import { createSessionTimeoutControl } from "#execution/session/timeout-control.js";
+import {
+  createSessionTimeoutControl,
+  type SessionTimeoutControl,
+} from "#execution/session/timeout-control.js";
 import { SessionHandoff, sessionAnchorToken } from "#execution/session/handoff.js";
 import { signalSessionAnchorStep } from "#execution/session/handoff-steps.js";
 import type { WorkflowEntryResult } from "#execution/session/entry-input.js";
@@ -102,15 +105,24 @@ export async function runPreparedSession(
     isInitialOwner: boot.anchor.kind === "self",
     sessionId: boot.sessionId,
   });
+  const sessionTimeout =
+    boot.sessionTimeoutDeadline === undefined
+      ? undefined
+      : createSessionTimeoutControl({
+          deadline: boot.sessionTimeoutDeadline,
+          sessionId: boot.sessionId,
+        });
   let result: WorkflowEntryResult = { output: "", isError: true };
   let loop: SessionLoopOutcome | undefined;
   try {
     try {
-      loop = await runSessionLoop(boot, { cursor, handoff, inbox, progress });
+      loop = await runSessionLoop(boot, { cursor, handoff, inbox, progress, sessionTimeout });
     } finally {
       await inbox.dispose();
     }
     if (loop.kind === "transferred") {
+      // The successor arms its own timer; this one must not outlive the wait for it.
+      await sessionTimeout?.dispose();
       if (boot.anchor.kind !== "self") return { output: "" };
       result = await handoff.awaitAnchoredResult();
       return result;
@@ -131,7 +143,12 @@ export async function runPreparedSession(
     }
     throw createSafeOuterWorkflowError();
   } finally {
-    await reportResultToAnchor(boot, result, handoff, loop);
+    // After the result is final, so cancelling the timer never delays the caller's reply.
+    // A timer that fires first reaches a disposed inbox and is ignored.
+    await Promise.all([
+      sessionTimeout?.dispose(),
+      reportResultToAnchor(boot, result, handoff, loop),
+    ]);
   }
 }
 
@@ -191,9 +208,11 @@ async function runSessionLoop(
     readonly handoff: SessionHandoff;
     readonly inbox: SessionInboxHandle;
     readonly progress: SessionProgress;
+    /** Armed beside the first action; the caller disposes it. */
+    readonly sessionTimeout: SessionTimeoutControl | undefined;
   },
 ): Promise<SessionLoopOutcome> {
-  const { cursor, handoff, inbox, progress } = deps;
+  const { cursor, handoff, inbox, progress, sessionTimeout } = deps;
   const queue = new SessionInputQueue();
   const execution = new SessionExecution({
     capabilities: boot.capabilities,
@@ -202,13 +221,6 @@ async function runSessionLoop(
     queue,
     sessionId: boot.sessionId,
   });
-  const sessionTimeout =
-    boot.sessionTimeoutDeadline === undefined
-      ? undefined
-      : createSessionTimeoutControl({
-          deadline: boot.sessionTimeoutDeadline,
-          sessionId: boot.sessionId,
-        });
 
   const nextParkedActivity = async (): Promise<
     Exclude<NextTurnInstruction, { kind: "workflow" | "cancel-working-tasks" }>
@@ -285,73 +297,67 @@ async function runSessionLoop(
     return { action, kind: "action" };
   };
 
-  try {
-    const [actionResult, timerResult] = await Promise.allSettled([
-      runInitialAction(),
-      sessionTimeout?.start(),
-    ]);
-    if (timerResult.status === "rejected") throw timerResult.reason;
-    if (actionResult.status === "rejected") throw actionResult.reason;
-    const initial = actionResult.value;
-    if (initial.kind !== "action") return initial;
-    let action = initial.action;
+  const [actionResult, timerResult] = await Promise.allSettled([
+    runInitialAction(),
+    sessionTimeout?.start(),
+  ]);
+  if (timerResult.status === "rejected") throw timerResult.reason;
+  if (actionResult.status === "rejected") throw actionResult.reason;
+  const initial = actionResult.value;
+  if (initial.kind !== "action") return initial;
+  let action = initial.action;
 
-    while (true) {
-      if (action.kind === "done") {
-        return { kind: "terminal", outcome: { action, kind: "done" } };
+  while (true) {
+    if (action.kind === "done") {
+      return { kind: "terminal", outcome: { action, kind: "done" } };
+    }
+
+    if (action.cancelled === true) {
+      const cancelledCaller = { caller: progress.caller, sessionId: boot.sessionId };
+      const settled = await settleCancelledTurn(progress.caller !== undefined);
+      if (cancelledCaller.caller !== undefined) {
+        await notifyCancelledTaskCallerStep(
+          settled.usage === undefined
+            ? cancelledCaller
+            : { ...cancelledCaller, usage: settled.usage },
+        );
       }
-
-      if (action.cancelled === true) {
-        const cancelledCaller = { caller: progress.caller, sessionId: boot.sessionId };
-        const settled = await settleCancelledTurn(progress.caller !== undefined);
-        if (cancelledCaller.caller !== undefined) {
-          await notifyCancelledTaskCallerStep(
-            settled.usage === undefined
-              ? cancelledCaller
-              : { ...cancelledCaller, usage: settled.usage },
-          );
-        }
-      } else if (action.settled !== undefined) {
-        if (progress.caller !== undefined) {
-          await notifyTurnCallerStep({
-            caller: progress.caller,
-            lifecycle: "parked",
-            sessionId: boot.sessionId,
-            settled: action.settled,
-          });
-        }
-        progress.caller = undefined;
+    } else if (action.settled !== undefined) {
+      if (progress.caller !== undefined) {
+        await notifyTurnCallerStep({
+          caller: progress.caller,
+          lifecycle: "parked",
+          sessionId: boot.sessionId,
+          settled: action.settled,
+        });
       }
+      progress.caller = undefined;
+    }
 
-      const next = await nextParkedActivity();
+    const next = await nextParkedActivity();
 
-      switch (next.kind) {
-        case "expired":
-        case "reset":
-        case "closed":
-          return { kind: "terminal", outcome: { kind: "expired" } };
-        case "clear":
-        case "compact":
-          action = await runTurn({ control: next.kind });
-          continue;
-        case "cancel-turn":
-          await cancelDescendantTurnsStep({
-            sessionState: cursor.sessionState,
-          });
-          await cancelWorkingTasks(cursor, "turn_cancelled");
-          await settleCancelledTurn(false);
-          // Cancellation consumes any outstanding caller; do not report the prior turn.
-          action = { ...action, settled: undefined };
-          continue;
-        case "turn": {
-          const result = await runDeliveredTurn(next);
-          if (result.kind !== "action") return result;
-          action = result.action;
-          continue;
-        }
+    switch (next.kind) {
+      case "expired":
+      case "reset":
+      case "closed":
+        return { kind: "terminal", outcome: { kind: "expired" } };
+      case "clear":
+      case "compact":
+        action = await runTurn({ control: next.kind });
+        continue;
+      case "cancel-turn":
+        await cancelDescendantTurns(cursor.sessionState);
+        await cancelWorkingTasks(cursor, "turn_cancelled");
+        await settleCancelledTurn(false);
+        // Cancellation consumes any outstanding caller; do not report the prior turn.
+        action = { ...action, settled: undefined };
+        continue;
+      case "turn": {
+        const result = await runDeliveredTurn(next);
+        if (result.kind !== "action") return result;
+        action = result.action;
+        continue;
       }
     }
-  } finally {
-    await sessionTimeout?.dispose();
   }
 }

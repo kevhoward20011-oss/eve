@@ -1,7 +1,7 @@
 import { sleep } from "#compiled/@workflow/core/index.js";
 
 import type { DeliverHookPayload, SessionCapabilities, TurnCaller } from "#channel/types.js";
-import { cancelDescendantTurnsStep } from "#execution/cancel-descendant-turns-step.js";
+import { cancelDescendantTurns } from "#execution/cancel-descendant-turns.js";
 import { dispatchCoordinationStep } from "#execution/coordination-dispatch-step.js";
 import type { SessionInputQueue } from "#execution/session/input-queue.js";
 import { taskToolResult, type TaskToolCall } from "#execution/tasks/calls.js";
@@ -257,9 +257,7 @@ export class SessionExecution {
     const { cursor } = this.input;
     // A child a run opened before the cancel appears before its task settles as cancelled.
     await this.handleBoundaryMessages(turn.takeBoundaryMessages("agent-started"));
-    await cancelDescendantTurnsStep({
-      sessionState: cursor.sessionState,
-    });
+    await cancelDescendantTurns(cursor.sessionState);
     await cancelWorkingTasks(cursor, "turn_cancelled");
     return { cancelled: true, kind: "park" };
   }
