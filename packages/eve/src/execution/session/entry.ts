@@ -89,7 +89,7 @@ async function bootInitialOwner(
     nodeId?: string;
   };
   try {
-    const [sessionCreation, stableClaim, aliasClaim] = await Promise.allSettled([
+    const [sessionCreation, stableClaim, aliasClaim, callerResolution] = await Promise.allSettled([
       createSessionStep({
         compiledArtifactsSource: serializedBundle.source,
         continuationToken,
@@ -104,6 +104,9 @@ async function bootInitialOwner(
       }),
       inbox.claimSessionHook(sessionCommandHookToken(sessionId)),
       continuationToken === "" ? Promise.resolve() : inbox.claimSessionHook(continuationToken),
+      hasDelegatedSessionContext(serializedContext)
+        ? resolveInitialTurnCallerStep({ serializedContext })
+        : Promise.resolve(undefined),
     ]);
     if (sessionCreation.status === "rejected") throw sessionCreation.reason;
     if (stableClaim.status === "rejected") throw stableClaim.reason;
@@ -118,13 +121,12 @@ async function bootInitialOwner(
       await inbox.dispose();
       return undefined;
     }
+    if (callerResolution.status === "rejected") throw callerResolution.reason;
     return {
       inbox,
       session: {
         anchor: { kind: "self" },
-        caller: hasDelegatedSessionContext(serializedContext)
-          ? await resolveInitialTurnCallerStep({ serializedContext })
-          : undefined,
+        caller: callerResolution.value,
         capabilities: serializedContext["eve.capabilities"] as SessionCapabilities | undefined,
         deploymentId: input.ownerDeploymentId,
         history: sessionCreation.value.history,

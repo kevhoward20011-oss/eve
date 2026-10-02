@@ -80,6 +80,7 @@ import {
 } from "#execution/durable-session-store.js";
 import { buildRuntimeIdentity, createExecutionNodeStep } from "#execution/node-step.js";
 import { prepareWorkflowPreambleTrace } from "#execution/workflow-trace-context.js";
+import { bindTurnCallerContext } from "#subagents/parent-notification.js";
 import { resolveEffectiveAgentRuntime } from "#execution/effective-agent-config.js";
 import { reconcileSessionContinuationToken } from "#execution/reconcile-session-continuation-token.js";
 import { hydrateDurableSession, refreshSessionFromTurnAgent } from "#execution/session.js";
@@ -105,7 +106,12 @@ export type { TurnStepInput };
 /** Runs a bounded batch of harness model steps inside one durable `"use step"` boundary. */
 export async function turnStep(input: TurnStepInput): Promise<TurnStepResult> {
   "use step";
-  return await withSessionStateDelta(input, runSessionStep);
+  return await withSessionStateDelta(input, (state) =>
+    runSessionStep({
+      ...state,
+      serializedContext: bindTurnCallerContext(state.caller, state.serializedContext),
+    }),
+  );
 }
 
 async function runSessionStep(input: TurnStepInput): Promise<DurableStepResult> {
@@ -192,6 +198,7 @@ async function runSessionStep(input: TurnStepInput): Promise<DurableStepResult> 
     sessionId: initialSession.sessionId,
   });
   const initialEmissionState = getHarnessEmissionState(initialSession.state);
+  let titleWrite: Promise<void> | undefined;
   if (
     !initialEmissionState.sessionStarted &&
     !ctx.has(SessionTitleKey) &&
@@ -201,7 +208,8 @@ async function runSessionStep(input: TurnStepInput): Promise<DurableStepResult> 
     const title = deriveSessionTitle(rawDelivery?.title ?? message);
     if (title !== undefined) {
       ctx.set(SessionTitleKey, title);
-      await setEveAttributes({ "$eve.title": title });
+      // Settled in the `finally` below, so the write overlaps the rest of the step.
+      titleWrite = setEveAttributes({ "$eve.title": title });
     }
   }
 
@@ -568,5 +576,6 @@ async function runSessionStep(input: TurnStepInput): Promise<DurableStepResult> 
     return durableResult;
   } finally {
     publisher.writer.release();
+    await titleWrite;
   }
 }

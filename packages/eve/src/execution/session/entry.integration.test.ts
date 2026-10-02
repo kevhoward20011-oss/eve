@@ -577,8 +577,6 @@ describe("workflowEntry integration", () => {
           ],
         });
         expect(await listCallerStepNames(child.runId)).toEqual([
-          "bindTurnCallerContextStep",
-          "bindTurnCallerContextStep",
           "notifyTurnCallerStep",
           "notifyTurnCallerStep",
           "resolveInitialTurnCallerStep",

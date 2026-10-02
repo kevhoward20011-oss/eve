@@ -1,7 +1,6 @@
 import type { DeliverHookPayload, SessionCapabilities, TurnCaller } from "#channel/types.js";
 import type { AgentWorkflowRetentionDefinition } from "#shared/agent-definition.js";
 import {
-  bindTurnCallerContextStep,
   notifyCancelledTaskCallerStep,
   notifyTurnCallerStep,
   resolveInitialTurnCallerStep,
@@ -236,11 +235,6 @@ async function runSessionLoop(
   let turnIndex = 0;
   const runTurn = async (payload: TurnStepPayload | undefined): Promise<TurnOutcome> => {
     const caller = progress.caller;
-    if (caller !== undefined) {
-      await cursor.advance((state) =>
-        bindTurnCallerContextStep({ caller, serializedContext: state.serializedContext }),
-      );
-    }
     progress.turnId = `turn_${String(turnIndex++)}`;
     const outcome = await execution.runTurn(payload, { caller });
     if (outcome.caller !== undefined) progress.caller = outcome.caller;
@@ -310,11 +304,13 @@ async function runSessionLoop(
       if (action.cancelled === true) {
         const cancelledCaller = { caller: progress.caller, sessionId: boot.sessionId };
         const settled = await settleCancelledTurn(progress.caller !== undefined);
-        await notifyCancelledTaskCallerStep(
-          settled.usage === undefined
-            ? cancelledCaller
-            : { ...cancelledCaller, usage: settled.usage },
-        );
+        if (cancelledCaller.caller !== undefined) {
+          await notifyCancelledTaskCallerStep(
+            settled.usage === undefined
+              ? cancelledCaller
+              : { ...cancelledCaller, usage: settled.usage },
+          );
+        }
       } else if (action.settled !== undefined) {
         if (progress.caller !== undefined) {
           await notifyTurnCallerStep({

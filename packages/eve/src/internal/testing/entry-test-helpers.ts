@@ -69,11 +69,7 @@ export function expectSingleTurn(events: readonly MessageStreamEvent[], turnId: 
   expect(new Set(eventTurnIds)).toEqual(new Set([turnId]));
 }
 
-const CALLER_STEP_NAMES = new Set([
-  "bindTurnCallerContextStep",
-  "notifyTurnCallerStep",
-  "resolveInitialTurnCallerStep",
-]);
+const CALLER_STEP_NAMES = new Set(["notifyTurnCallerStep", "resolveInitialTurnCallerStep"]);
 
 export async function listCallerStepNames(runId: string): Promise<string[]> {
   return (await listStepNames(runId)).filter((name) => CALLER_STEP_NAMES.has(name)).sort();

@@ -138,6 +138,40 @@ describe("SessionExecution checkpoints", () => {
     await createExecution({ inbox, sessionState: state("") }).runTurn(undefined);
     expect(turnStep).toHaveBeenCalledTimes(2);
   });
+  it("binds the delegated caller on the turn's first step only", async () => {
+    const inbox: SessionInbox = {
+      claimedTokens: [],
+      claimSessionHook: vi.fn(),
+      claimSessionHooks: vi.fn(),
+      drain: () => [],
+      hasPending: () => false,
+      whenPending: () => new Promise<void>(() => {}),
+      next: vi.fn(),
+      restore: vi.fn(),
+      onDelivery: () => () => {},
+      onInterrupt: () => () => {},
+    };
+    const caller: TurnCaller = {
+      callId: "call-1",
+      replyTo: { kind: "hook", token: "parent" },
+      subagentName: "researcher",
+    };
+    const callers: (TurnCaller | undefined)[] = [];
+    vi.mocked(turnStep)
+      .mockReset()
+      .mockImplementation(
+        turnStepWork(async (input) => {
+          callers.push(input.caller);
+          return {
+            action: callers.length === 1 ? "continue" : "done",
+            serializedContext: input.serializedContext,
+            sessionState: input.sessionState,
+          };
+        }),
+      );
+    await createExecution({ inbox, sessionState: state("") }).runTurn(undefined, { caller });
+    expect(callers).toEqual([caller, undefined]);
+  });
   it.each(["cancel", "reset"] as const)(
     "gives %s precedence over generation steering",
     async (kind) => {
@@ -949,6 +983,8 @@ describe("SessionExecution checkpoints", () => {
 
     expect(publishTurnWaitingStep).toHaveBeenCalledTimes(1);
     expect(publishTurnWaitingStep).toHaveBeenCalledWith(expect.objectContaining({ sessionState }));
+    // Only a task tool call is pending, so no run is dispatched.
+    expect(dispatchCoordinationStep).not.toHaveBeenCalled();
   });
 
   it("admits an idle agent task's usage report while the turn waits and counts it", async () => {

@@ -19,10 +19,6 @@ import { parseJsonValue } from "#shared/json.js";
 import type { TokenUsage } from "#shared/token-usage.js";
 import { resumeHook } from "#internal/workflow/runtime.js";
 import { postSessionCallbackRequest } from "#execution/session-callback-request.js";
-import {
-  withSessionStateDelta,
-  type SessionStateTransition,
-} from "#execution/session/state-delta.js";
 
 const log = createLogger("execution.delegated-parent-notification");
 
@@ -207,19 +203,11 @@ export async function resolveInitialTurnCallerStep(input: {
   };
 }
 
-/** Rebinds child event forwarding to the caller that owns the next accepted turn. */
-export async function bindTurnCallerContextStep(input: {
-  readonly caller: TurnCaller | undefined;
-  readonly serializedContext: Record<string, unknown>;
-}): Promise<SessionStateTransition> {
-  "use step";
-
-  return await withSessionStateDelta(input, async ({ caller, serializedContext }) => ({
-    serializedContext: bindTurnCallerContext(caller, serializedContext),
-  }));
-}
-
-function bindTurnCallerContext(
+/**
+ * Rebinds child event forwarding to the caller that owns the next accepted
+ * turn. `turnStep` applies it inline, so binding costs no durable step.
+ */
+export function bindTurnCallerContext(
   caller: TurnCaller | undefined,
   serializedContext: Record<string, unknown>,
 ): Record<string, unknown> {

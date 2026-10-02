@@ -29,6 +29,8 @@ export interface TurnStepPayload {
 /** Input for one atomic, session-owner-executed turn step. */
 export interface TurnStepInput {
   readonly abortSignal?: AbortSignal;
+  /** The delegated caller to bind into the context before the step runs; sent on a turn's first step. */
+  readonly caller?: TurnCaller;
   readonly steeringSignal?: AbortSignal;
   readonly input: TurnStepPayload | undefined;
   readonly sessionWritable: WritableStream<Uint8Array>;

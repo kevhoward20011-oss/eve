@@ -3,6 +3,7 @@ import type { DurableSessionState } from "#execution/durable-session-store.js";
 import { emitTerminalSessionCompletionStep } from "#execution/terminal-session-completion-step.js";
 import { emitTerminalSessionFailureStep } from "#execution/terminal-session-failure-step.js";
 import { terminateChildSessionsStep } from "#execution/terminate-child-sessions-step.js";
+import { liveTaskRuns, readTaskTable } from "#execution/tasks/table.js";
 import type { TurnOutcome } from "#execution/session/turn-step-types.js";
 import { normalizeSerializableError } from "#execution/workflow-errors.js";
 import type { WorkflowEntryResult } from "#execution/session/entry-input.js";
@@ -34,7 +35,7 @@ export async function finalizeSession(
   context: SessionFinalizationContext,
 ): Promise<WorkflowEntryResult> {
   const { serializedContext, sessionState } = context.cursor;
-  if (sessionState !== undefined) {
+  if (sessionState !== undefined && mayHaveLiveTaskRuns(sessionState)) {
     await terminateChildSessionsStep({ sessionState });
   }
   const session = sessionState?.snapshot.session;
@@ -82,6 +83,18 @@ export async function finalizeSession(
         usage: settled.sessionUsage,
         usageDelta: settled.turnUsage,
       };
+}
+
+/**
+ * Most sessions end with no task running, so the body skips the durable step
+ * that would find nothing to stop. An unreadable table runs the step, which logs it.
+ */
+function mayHaveLiveTaskRuns(sessionState: DurableSessionState): boolean {
+  try {
+    return liveTaskRuns(readTaskTable(sessionState.snapshot?.session?.state)).length > 0;
+  } catch {
+    return true;
+  }
 }
 
 function settledResult(

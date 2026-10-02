@@ -138,13 +138,18 @@ export class SessionExecution {
     delivery: TurnStepPayload | undefined,
   ): Promise<TurnOutcome> {
     let nextStepInput: TurnStepPayload | undefined = delivery;
+    // The turn's first step binds its caller into the context; later steps carry the bound context.
+    let bindCaller = turn.caller;
 
     while (true) {
       const { cursor } = this.input;
+      const caller = bindCaller;
+      bindCaller = undefined;
       const result = await cursor.advanceWithHistory((state) =>
         turnStep({
           ...state,
           abortSignal: turn.signal,
+          caller,
           input: nextStepInput,
           steeringSignal: turn.steeringSignal,
         }),
@@ -194,21 +199,29 @@ export class SessionExecution {
       }
 
       if (pendingCallIds !== undefined && result.action === "park") {
-        const dispatchResult = await cursor.advance((state) =>
-          dispatchCoordinationStep({
-            action: result.action,
-            workflowToolRunOwner: {
-              inbox: sessionInboxHookToken(sessionCommandHookToken(this.input.sessionId)),
-            },
-            ...state,
-          }),
-        );
-        const initialAcceptedAtMs = dispatchResult.results.length === 0 ? undefined : Date.now();
+        const taskToolCalls = result.pendingTaskToolCalls ?? [];
+        // Task tool calls are answered by the session, not dispatched, so a batch of
+        // only those has nothing for the dispatch step to start.
+        const dispatchesRuns = pendingCallIds.length > taskToolCalls.length;
+        const dispatchResults = dispatchesRuns
+          ? (
+              await cursor.advance((state) =>
+                dispatchCoordinationStep({
+                  action: result.action,
+                  workflowToolRunOwner: {
+                    inbox: sessionInboxHookToken(sessionCommandHookToken(this.input.sessionId)),
+                  },
+                  ...state,
+                }),
+              )
+            ).results
+          : [];
+        const initialAcceptedAtMs = dispatchResults.length === 0 ? undefined : Date.now();
 
         const runtimeResults = await this.waitForRuntimeActionResults({
           initialAcceptedAtMs,
-          initialResults: dispatchResult.results,
-          taskToolCalls: result.pendingTaskToolCalls ?? [],
+          initialResults: dispatchResults,
+          taskToolCalls,
           pendingCallIds,
           turn,
         });
