@@ -770,6 +770,49 @@ describe("mcpChannel tools", () => {
     }
   });
 
+  it("agent: false serves only what tools and skills publish and frees the agent_* names", async () => {
+    const core = fakeCore();
+    const description: AgentDescription = {
+      ...toolsDescription,
+      tools: [
+        {
+          approval: false,
+          description: "An authored tool named like the channel's.",
+          inputSchema: { type: "object" },
+          invocable: true,
+          name: "agent_start",
+        },
+        ...toolsDescription.tools,
+      ],
+    };
+    const args = routeArgs({ description, invokeTool: core, readSkill });
+
+    const toolsOnly = toolsChannel({ agent: false });
+    const discovered = (await rpc(toolsOnly, modernRequest("server/discover", {}), args)).result;
+    expect(discovered.instructions).toBeUndefined();
+    const listed = await rpc(toolsOnly, modernRequest("tools/list", {}), args);
+    expect(listed.result.tools.map((t: { name: string }) => t.name)).toEqual([
+      "agent_start",
+      "deploy",
+      "issues",
+      "plain",
+    ]);
+    await rpc(toolsOnly, callTool({ arguments: {}, name: "agent_start" }), args);
+    expect(core.mock.calls.map(([name]) => name)).toEqual(["agent_start"]);
+
+    const skillsOnly = toolsChannel({ agent: false, skills: true, tools: false });
+    const skillsDiscover = (await rpc(skillsOnly, modernRequest("server/discover", {}), args))
+      .result;
+    expect(skillsDiscover.capabilities.tools).toBeUndefined();
+    expect((await rpc(skillsOnly, modernRequest("tools/list", {}), args)).error?.code).toBe(
+      -32_601,
+    );
+
+    expect(() => toolsChannel({ agent: false, skills: false, tools: false })).toThrow(
+      "mcpChannel publishes nothing with agent, tools, and skills all false. Enable at least one.",
+    );
+  });
+
   it("refuses a forged, edited, expired, or rebound requestState with -32602", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
