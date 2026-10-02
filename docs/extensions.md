@@ -212,7 +212,7 @@ Extension state belongs to the logical mount path (for example, `extensions/crm`
 
 Deployments before eve 0.69 stored extension state under package-prefixed keys, such as `acme-crm.requests`. When a session from one of those deployments hands off to a newer deployment, eve moves each package-prefixed value to the mount that uses that package. eve never resets that state during restore.
 
-- If several mounts use the same package, eve cannot tell which mount owned the value. The handoff is rejected and the session stays on its current deployment. Keep that deployment available until the session finishes, or start a new session on the deployment you want to use.
+- The value moves only when exactly one mount uses the package and the extension still defines that state name. Otherwise eve cannot tell which mount owns the value, so the handoff is rejected and the session stays on its current deployment. Keep that deployment available until the session finishes, or start a new session on the deployment you want to use.
 - Older deployments cannot read sessions saved by a newer release, so a session that already moved does not hand back after a rollback.
 - Local context snapshots follow the same rule: an older snapshot restores when every saved state key still has an owner.
 

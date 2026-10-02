@@ -9,20 +9,30 @@ import { isObject } from "#shared/guards.js";
 export const MIN_SESSION_CHECKPOINT_VERSION = 8;
 
 export type SessionCheckpointMigration =
-  | { readonly kind: "current"; readonly checkpoint: SessionCheckpoint }
+  | {
+      readonly kind: "current";
+      readonly checkpoint: SessionCheckpoint;
+      /** Idle child sessions the current build no longer tracks; the successor stops them. */
+      readonly childRunIdsToStop: readonly string[];
+    }
   | { readonly kind: "incompatible"; readonly detail: string };
 
 type CheckpointRecord = Record<string, unknown>;
+
+interface UpgradeEffects {
+  readonly childRunIdsToStop: string[];
+}
 
 /**
  * One pure upgrade per checkpoint version, keyed by the version it reads.
  * Bumping `SESSION_CHECKPOINT_VERSION` requires adding the step from the
  * previous version: a successor must always accept its predecessors'
- * checkpoints. A step refuses only state it cannot carry forward losslessly;
- * the owner then keeps the session.
+ * checkpoints. A step refuses state the current build cannot continue, such
+ * as work still in flight; the owner then keeps the session. Steps cover the
+ * shapes released builds wrote.
  */
 const CHECKPOINT_UPGRADES: Readonly<
-  Record<number, (checkpoint: CheckpointRecord) => CheckpointRecord>
+  Record<number, (checkpoint: CheckpointRecord, effects: UpgradeEffects) => CheckpointRecord>
 > = {
   // Run mode was removed (eve 0.67).
   8: (checkpoint) => {
@@ -32,24 +42,25 @@ const CHECKPOINT_UPGRADES: Readonly<
       serializedContext: omitKeys(readRecord(rest, "serializedContext"), ["eve.mode"]),
     };
   },
-  // Background tasks, activity artifacts, and cached connection search results
-  // were removed during version 9 (eve 0.69), and mount-scoped state was added.
-  9: (checkpoint) => {
+  // eve 0.69 removed background tasks, subagent handles, activity artifacts, and
+  // cached connection search results, and moved protocol-1 caller detection.
+  9: (checkpoint, effects) => {
     const sessionState = readRecord(checkpoint, "sessionState");
     const snapshot = readRecord(sessionState, "snapshot");
-    const session = readRecord(snapshot, "session");
+    const { taskId: _taskId, ...session } = readRecord(snapshot, "session");
     return {
       ...checkpoint,
-      serializedContext: omitKeys(readRecord(checkpoint, "serializedContext"), [
-        "eve.activityObserver",
-        "eve.activityPendingBlockers",
-        "eve.activityRootTurnId",
-        "eve.activityTaskCalls",
-        "eve.connectionSearchResults",
-        "eve.internal.backgroundToolExecution",
-        "eve.runtime.taskDeliveryPolicy",
-        "eve.turnTaskDelivery",
-      ]),
+      serializedContext: upgradeLegacyCaller(
+        omitKeys(readRecord(checkpoint, "serializedContext"), [
+          "eve.activityObserver",
+          "eve.activityPendingBlockers",
+          "eve.activityRootTurnId",
+          "eve.connectionSearchResults",
+          "eve.internal.backgroundToolExecution",
+          "eve.runtime.taskDeliveryPolicy",
+          "eve.turnTaskDelivery",
+        ]),
+      ),
       sessionState: {
         ...sessionState,
         snapshot: {
@@ -57,7 +68,7 @@ const CHECKPOINT_UPGRADES: Readonly<
           session: {
             ...session,
             history: readArray(session, "history").map(renameBackgroundTaskMessage),
-            state: upgradeWorkflowToolRuns(session.state),
+            state: upgradeSessionState(session.state, effects),
           },
         },
       },
@@ -67,7 +78,7 @@ const CHECKPOINT_UPGRADES: Readonly<
   10: (checkpoint) => {
     const sessionState = readRecord(checkpoint, "sessionState");
     const snapshot = readRecord(sessionState, "snapshot");
-    const { history, taskId: _taskId, ...session } = readRecord(snapshot, "session");
+    const { history, ...session } = readRecord(snapshot, "session");
     if (sessionState.version !== 1) refuse("durable session version is not 1");
     if (!Array.isArray(history)) refuse("session history is missing");
     return {
@@ -80,8 +91,9 @@ const CHECKPOINT_UPGRADES: Readonly<
 
 /**
  * Upgrades a checkpoint written by an older eve build to the current shape.
- * Newer checkpoints and those older than {@link MIN_SESSION_CHECKPOINT_VERSION}
- * are incompatible.
+ * Pure, so the session workflow can run it before validation. Newer
+ * checkpoints and those older than {@link MIN_SESSION_CHECKPOINT_VERSION} are
+ * incompatible.
  */
 export function migrateSessionCheckpoint(checkpoint: unknown): SessionCheckpointMigration {
   if (!isObject(checkpoint)) return { kind: "incompatible", detail: "checkpoint is not an object" };
@@ -97,24 +109,22 @@ export function migrateSessionCheckpoint(checkpoint: unknown): SessionCheckpoint
       detail: `checkpoint version ${JSON.stringify(version)} is outside the supported range ${MIN_SESSION_CHECKPOINT_VERSION}-${SESSION_CHECKPOINT_VERSION}`,
     };
   }
+  const effects: UpgradeEffects = { childRunIdsToStop: [] };
   let current: CheckpointRecord = checkpoint;
   try {
     for (let from = version; from < SESSION_CHECKPOINT_VERSION; from++) {
       const upgrade = CHECKPOINT_UPGRADES[from];
       if (upgrade === undefined) refuse(`no upgrade from checkpoint version ${from}`);
-      current = { ...upgrade(current), version: from + 1 };
+      current = { ...upgrade(current, effects), version: from + 1 };
     }
   } catch (error) {
     if (!(error instanceof CheckpointRefusal)) throw error;
-    return {
-      kind: "incompatible",
-      detail: `checkpoint version ${version}: ${error.message}`,
-    };
+    return { kind: "incompatible", detail: `checkpoint version ${version}: ${error.message}` };
   }
   if (!isCurrentCheckpoint(current)) {
     return { kind: "incompatible", detail: `checkpoint version ${version} is incomplete` };
   }
-  return { kind: "current", checkpoint: current };
+  return { kind: "current", checkpoint: current, childRunIdsToStop: effects.childRunIdsToStop };
 }
 
 function isCurrentCheckpoint(value: unknown): value is SessionCheckpoint {
@@ -149,6 +159,23 @@ function omitKeys(record: CheckpointRecord, keys: readonly string[]): Checkpoint
   return Object.fromEntries(Object.entries(record).filter(([key]) => !keys.includes(key)));
 }
 
+/**
+ * Earlier builds forwarded a session's questions to its caller as `task.*`
+ * callbacks only when the callback named a task. The current build reads that
+ * choice from the protocol-1 caller record instead.
+ */
+function upgradeLegacyCaller(context: CheckpointRecord): CheckpointRecord {
+  const callback = context["eve.sessionCallback"];
+  if (!isObject(callback)) return context;
+  const { taskId, ...current } = callback;
+  return {
+    ...context,
+    "eve.legacyRemoteAgentCaller":
+      typeof taskId === "string" && taskId.length > 0 ? { taskId } : {},
+    "eve.sessionCallback": current,
+  };
+}
+
 // Task notifications are framework-authored task results; history validation rejects the old kind.
 function renameBackgroundTaskMessage(message: unknown): unknown {
   return isObject(message) &&
@@ -158,15 +185,22 @@ function renameBackgroundTaskMessage(message: unknown): unknown {
     : message;
 }
 
-/**
- * Version 3 also recorded session-owned background tasks. Settled ones already
- * reported to the conversation and have no current reader, so they are dropped.
- * Any other run means work is still in flight.
- */
-function upgradeWorkflowToolRuns(state: unknown): unknown {
+function upgradeSessionState(state: unknown, effects: UpgradeEffects): unknown {
   if (!isObject(state)) return state;
+  return omitKeys(state, [
+    ...dropSettledWorkflowToolRuns(state),
+    ...stopIdleSubagents(state, effects),
+  ]);
+}
+
+/**
+ * Version 3 of the workflow tool run registry also recorded session-owned
+ * background tasks. Settled ones already reported to the conversation and have
+ * no current reader. Any other run means work is still in flight.
+ */
+function dropSettledWorkflowToolRuns(state: CheckpointRecord): string[] {
   const registry = state["eve.workflowTool"];
-  if (!isObject(registry) || registry.version !== 3) return state;
+  if (!isObject(registry) || registry.version !== 3) return [];
   const runs = registry.runs;
   if (
     !Array.isArray(runs) ||
@@ -180,5 +214,31 @@ function upgradeWorkflowToolRuns(state: unknown): unknown {
   ) {
     refuse("workflow tool run registry version 3 holds unsettled runs");
   }
-  return omitKeys(state, ["eve.workflowTool"]);
+  return ["eve.workflowTool"];
+}
+
+/**
+ * Earlier builds kept idle subagent sessions resumable through handles. The
+ * current build has no reader for them, so the successor stops their local runs.
+ * Remote sessions end on their own deployment.
+ */
+function stopIdleSubagents(state: CheckpointRecord, effects: UpgradeEffects): string[] {
+  const store = state["eve.agent.handles"];
+  if (store === undefined) return [];
+  if (!isObject(store) || !Array.isArray(store.handles)) refuse("subagent handles are malformed");
+  for (const handle of store.handles) {
+    if (!isObject(handle) || (handle.phase !== "parked" && handle.phase !== "available")) {
+      refuse("a subagent session is still working");
+    }
+    const address = handle.address;
+    if (
+      isObject(address) &&
+      (address.kind === "agent/local" || address.kind === "agent/self") &&
+      typeof address.sessionId === "string" &&
+      address.sessionId.length > 0
+    ) {
+      effects.childRunIdsToStop.push(address.sessionId);
+    }
+  }
+  return ["eve.agent.handles"];
 }

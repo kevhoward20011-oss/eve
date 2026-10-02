@@ -141,6 +141,10 @@ export class SessionHandoff {
       createHook<never>({ token: sessionHandoffMarkerToken(token) }),
     );
     await Promise.all(markers.map((marker) => claimHookOwnership(marker)));
+    let retained: {
+      readonly error?: unknown;
+      readonly reason: "activation-failed" | "checkpoint-incompatible";
+    };
     try {
       const acceptedDuringRelease = await inbox.release();
       if (acceptedDuringRelease.length > 0) {
@@ -148,7 +152,6 @@ export class SessionHandoff {
         return { kind: "retained", reason: "accepted-during-release" };
       }
       let acceptedByFailedCandidate: readonly SessionInboxPayload[] = [];
-      let failure: unknown;
       try {
         const activation = await this.startAndActivate(
           checkpoint,
@@ -156,24 +159,23 @@ export class SessionHandoff {
           targetDeploymentId,
         );
         if (activation.kind === "active") return { kind: "transferred" };
+        acceptedByFailedCandidate = activation.payloads;
         if (activation.kind === "incompatible") {
           this.incompatibleTargetDeploymentIds.add(targetDeploymentId);
-          await this.recover(tokens, activation.payloads);
-          await this.reportRetained("checkpoint-incompatible", targetDeploymentId);
-          return { kind: "retained", reason: "checkpoint-incompatible" };
+          retained = { reason: "checkpoint-incompatible" };
+        } else {
+          retained = { error: activation.error, reason: "activation-failed" };
         }
-        acceptedByFailedCandidate = activation.payloads;
-        failure = activation.error;
       } catch (error) {
         // The current owner remains authoritative until activation.
-        failure = error;
+        retained = { error, reason: "activation-failed" };
       }
       await this.recover(tokens, acceptedByFailedCandidate);
-      await this.reportRetained("activation-failed", targetDeploymentId, failure);
-      return { kind: "retained", reason: "activation-failed" };
     } finally {
       await Promise.all(markers.map((marker) => disposeHook(marker)));
     }
+    await this.reportRetained(retained.reason, targetDeploymentId, retained.error);
+    return { kind: "retained", reason: retained.reason };
   }
 
   /** After a transfer, the original run parks until the final owner reports the session result. */

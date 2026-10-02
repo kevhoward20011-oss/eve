@@ -360,7 +360,7 @@ describe("workflowEntry integration", () => {
       expect(output.unexpected(workflowSdkNotice.unpinnedDelivery, HANDOFF_LOG)).toEqual([]);
     });
 
-    it("hands a session from an eve 0.66 owner to a current successor", async () => {
+    it("continues an eve 0.66 checkpoint on a current successor and stops its idle children", async () => {
       const output = captureConsoleOutput();
       const runtime = await createTestRuntime({ agent: { name: "handoff-eve-066-owner" } });
       await runtime.run(async () => {
@@ -432,6 +432,12 @@ describe("workflowEntry integration", () => {
             sessionInboxHookToken(sessionCommandHookToken(anchor.runId)),
           );
           expect(rewritten.has(successor.runId)).toBe(true);
+          const successorSteps = await world.steps.list({ runId: successor.runId });
+          expect(
+            successorSteps.data.some((step) =>
+              step.stepName.endsWith("//stopUntrackedChildSessionsStep"),
+            ),
+          ).toBe(true);
           await vi.waitFor(
             async () => {
               const [state] = await readTurnStepStates(successor.runId);
@@ -735,7 +741,28 @@ function toEve066HandoffInput(input: HandoffWorkflowEntryInput): unknown {
       },
       sessionState: {
         ...sessionState,
-        snapshot: { session: { ...sessionState.snapshot.session, history } },
+        snapshot: {
+          session: {
+            ...sessionState.snapshot.session,
+            history,
+            state: {
+              ...sessionState.snapshot.session.state,
+              // A finished subagent the old owner kept resumable; its run no longer exists.
+              "eve.agent.handles": {
+                handles: [
+                  {
+                    address: {
+                      continuationToken: "child-token",
+                      kind: "agent/local",
+                      sessionId: "wrun_child_from_eve_066",
+                    },
+                    phase: "parked",
+                  },
+                ],
+              },
+            },
+          },
+        },
         version: 1,
       },
       version: 8,

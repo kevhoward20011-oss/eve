@@ -1,17 +1,22 @@
 import { getBlockingWorkflowToolRuns } from "#harness/workflow-tool-runs.js";
-import { deserializeContext } from "#context/serialize.js";
-import { migrateSessionCheckpoint } from "#execution/session/checkpoint-migrations.js";
+import {
+  EntityConflictError,
+  RunExpiredError,
+  WorkflowRunNotFoundError,
+} from "#compiled/@workflow/errors/index.js";
+import { deserializeContext, IncompatibleStateLayoutError } from "#context/serialize.js";
+import type { SessionCheckpointMigration } from "#execution/session/checkpoint-migrations.js";
 import { readDurableSession, type DurableSessionState } from "#execution/durable-session-store.js";
 import {
   SESSION_CHECKPOINT_VERSION,
-  type SessionCheckpoint,
   type SessionOwnerActivation,
 } from "#execution/session/handoff.js";
-import { createLogger } from "#internal/logging.js";
-import { resumeHook } from "#internal/workflow/runtime.js";
+import { createLogger, logError } from "#internal/logging.js";
+import { cancelRun, getWorld, resumeHook } from "#internal/workflow/runtime.js";
 import { getResolvedRuntimeAgentNode } from "#runtime/graph.js";
 import { BundleKey } from "#runtime/sessions/runtime-context-keys.js";
 import { getSandboxEnvironmentRuntime } from "#shared/sandbox-environment.js";
+import { walkCauseChain } from "#shared/errors.js";
 import { isObject } from "#shared/guards.js";
 
 const log = createLogger("execution.handoff");
@@ -52,34 +57,31 @@ export async function isSessionIdleForHandoffStep(input: {
 }
 
 export type SessionCheckpointValidation =
-  | {
-      readonly kind: "valid";
-      /** The upgraded checkpoint, present only when an older eve build wrote it. */
-      readonly checkpoint?: SessionCheckpoint;
-    }
+  | { readonly kind: "valid" }
   | { readonly kind: "incompatible"; readonly reason: "checkpoint-version" };
 
 /**
- * Upgrades and validates a checkpoint, and resolves the target deployment's
+ * Validates an upgraded checkpoint and resolves the target deployment's
  * compiled bundle.
  *
- * An unreadable version is a settled answer about this deployment, not a
- * fault, so it returns rather than throws: retrying the step can never change it.
+ * A checkpoint this deployment cannot read is a settled answer, not a fault,
+ * so it returns rather than throws: retrying the step can never change it.
  */
 export async function validateSessionCheckpointStep(input: {
-  readonly checkpoint: SessionCheckpoint;
+  readonly migration: SessionCheckpointMigration;
   readonly sessionId: string;
 }): Promise<SessionCheckpointValidation> {
   "use step";
-  const migration = migrateSessionCheckpoint(input.checkpoint);
-  if (migration.kind === "incompatible") {
+  const { migration } = input;
+  const unreadable = (detail: string): SessionCheckpointValidation => {
     log.warn("session handoff refused: this deployment cannot read the checkpoint", {
-      detail: migration.detail,
+      detail,
       readableCheckpointVersion: SESSION_CHECKPOINT_VERSION,
       sessionId: input.sessionId,
     });
     return { kind: "incompatible", reason: "checkpoint-version" };
-  }
+  };
+  if (migration.kind === "incompatible") return unreadable(migration.detail);
   const { checkpoint } = migration;
   const timeout = checkpoint.sessionTimeoutMs;
   if (
@@ -87,7 +89,13 @@ export async function validateSessionCheckpointStep(input: {
     (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout < 0)
   )
     throw new Error("Session checkpoint contains an invalid timeout duration.");
-  const context = await deserializeContext(checkpoint.serializedContext);
+  let context: Awaited<ReturnType<typeof deserializeContext>>;
+  try {
+    context = await deserializeContext(checkpoint.serializedContext);
+  } catch (error) {
+    if (error instanceof IncompatibleStateLayoutError) return unreadable(error.message);
+    throw error;
+  }
   const bundle = context.require(BundleKey);
   const session = readDurableSession(checkpoint.sessionState);
   const sandboxState = session.sandboxState?.session;
@@ -110,7 +118,38 @@ export async function validateSessionCheckpointStep(input: {
   if (!isSessionStateIdleForHandoff(checkpoint.sessionState)) {
     throw new Error("Session checkpoint contains pending work and cannot be handed off.");
   }
-  return checkpoint === input.checkpoint ? { kind: "valid" } : { kind: "valid", checkpoint };
+  return { kind: "valid" };
+}
+
+/**
+ * Stops idle subagent sessions an older owner kept resumable, after this owner
+ * activates. Best effort: a child that cannot be stopped ends at its own timeout.
+ */
+export async function stopUntrackedChildSessionsStep(input: {
+  readonly runIds: readonly string[];
+  readonly sessionId: string;
+}): Promise<void> {
+  "use step";
+  const world = await getWorld();
+  for (const runId of input.runIds) {
+    if (runId === input.sessionId) continue;
+    try {
+      await cancelRun(world, runId, { cancelReason: "Session upgraded" });
+    } catch (error) {
+      const settled = [...walkCauseChain(error)].some(
+        (cause) =>
+          EntityConflictError.is(cause) ||
+          RunExpiredError.is(cause) ||
+          WorkflowRunNotFoundError.is(cause),
+      );
+      if (!settled) {
+        logError(log, "could not stop a subagent session after handoff", error, {
+          childRunId: runId,
+          sessionId: input.sessionId,
+        });
+      }
+    }
+  }
 }
 
 /** Records why the owner kept a session it tried to move, so a stuck handoff is visible. */

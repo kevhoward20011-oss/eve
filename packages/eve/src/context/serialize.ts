@@ -49,13 +49,13 @@ export async function deserializeContext(
 
   const serializedBundle = data[BundleKey.name];
   if (data[STATE_LAYOUT_KEY] !== undefined && data[STATE_LAYOUT_KEY] !== STATE_LAYOUT_VERSION) {
-    throw incompatibleStateLayout();
+    throw new IncompatibleStateLayoutError();
   }
   if (
     data[STATE_LAYOUT_KEY] === undefined &&
     Object.keys(data).some((name) => data[name] !== undefined && name.startsWith("eve:mount."))
   ) {
-    throw incompatibleStateLayout();
+    throw new IncompatibleStateLayoutError();
   }
   if (serializedBundle !== undefined) {
     const codec = BundleKey.codec;
@@ -121,7 +121,7 @@ async function adoptLegacyStateLayout(
       resolveKey(mounted) === undefined ||
       data[mounted] !== undefined
     ) {
-      throw incompatibleStateLayout(name);
+      throw new IncompatibleStateLayoutError(name);
     }
     adopted[mounted] = value;
   }
@@ -138,8 +138,12 @@ function legacyPackageStateNamespace(packageName: string): string {
   );
 }
 
-function incompatibleStateLayout(key?: string): Error {
-  return new Error(
-    `Incompatible context state layout${key === undefined ? "" : ` for key "${key}"`}. Restore this session with its original deployment or start a new session; state with no unambiguous owner in this deployment cannot be carried forward.`,
-  );
+/** A context whose saved state this deployment cannot place; retrying never changes the answer. */
+export class IncompatibleStateLayoutError extends Error {
+  constructor(key?: string) {
+    super(
+      `Incompatible context state layout${key === undefined ? "" : ` for key "${key}"`}. Restore this session with its original deployment or start a new session; state with no unambiguous owner in this deployment cannot be carried forward.`,
+    );
+    this.name = "IncompatibleStateLayoutError";
+  }
 }

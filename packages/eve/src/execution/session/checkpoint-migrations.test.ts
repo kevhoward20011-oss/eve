@@ -7,6 +7,7 @@ describe("migrateSessionCheckpoint", () => {
   it("upgrades a checkpoint written by an eve 0.66 owner to the current shape", () => {
     expect(migrateSessionCheckpoint(eve066Checkpoint())).toEqual({
       kind: "current",
+      childRunIdsToStop: ["child-local"],
       checkpoint: {
         history: [
           { content: "Alice asks for a report.", kind: "user", role: "user" },
@@ -17,6 +18,8 @@ describe("migrateSessionCheckpoint", () => {
           "eve.auth": null,
           "eve.bundle": { source: { kind: "bundled" } },
           "eve.channel": { kind: "http", state: {} },
+          "eve.legacyRemoteAgentCaller": { taskId: "caller-task" },
+          "eve.sessionCallback": CALLBACK,
           "eve.sessionTitle": "Alice asks for a report.",
         },
         sessionState: {
@@ -41,10 +44,21 @@ describe("migrateSessionCheckpoint", () => {
     });
   });
 
-  it("keeps the session on its owner while a version 3 workflow tool run is unsettled", () => {
-    expect(migrateSessionCheckpoint(eve066Checkpoint({ settled: false }))).toEqual({
+  it.each([
+    [
+      "a version 3 workflow tool run is unsettled",
+      { settledTask: false },
+      "workflow tool run registry version 3 holds unsettled runs",
+    ],
+    [
+      "a subagent session is working",
+      { subagentPhase: "running" },
+      "a subagent session is still working",
+    ],
+  ])("keeps the session on its owner while %s", (_name, options, detail) => {
+    expect(migrateSessionCheckpoint(eve066Checkpoint(options))).toEqual({
       kind: "incompatible",
-      detail: "checkpoint version 8: workflow tool run registry version 3 holds unsettled runs",
+      detail: `checkpoint version 8: ${detail}`,
     });
   });
 
@@ -55,8 +69,18 @@ describe("migrateSessionCheckpoint", () => {
   });
 });
 
+const CALLBACK = {
+  callId: "call-0",
+  subagentName: "research",
+  token: "callback-token",
+  url: "https://caller.example/eve/v1/callback/callback-token",
+};
+
 /** Trimmed from a handoff checkpoint captured from an eve 0.66.1 owner. */
-function eve066Checkpoint({ settled = true }: { readonly settled?: boolean } = {}) {
+function eve066Checkpoint({
+  settledTask = true,
+  subagentPhase = "parked",
+}: { readonly settledTask?: boolean; readonly subagentPhase?: string } = {}) {
   return {
     mode: "conversation",
     serializedContext: {
@@ -65,6 +89,7 @@ function eve066Checkpoint({ settled = true }: { readonly settled?: boolean } = {
       "eve.channel": { kind: "http", state: {} },
       "eve.mode": "conversation",
       "eve.runtime.taskDeliveryPolicy": "auto",
+      "eve.sessionCallback": { ...CALLBACK, taskId: "caller-task" },
       "eve.sessionTitle": "Alice asks for a report.",
       "eve.turnTaskDelivery": "none",
     },
@@ -85,6 +110,26 @@ function eve066Checkpoint({ settled = true }: { readonly settled?: boolean } = {
           sandboxState: { session: null },
           sessionId: "session-1",
           state: {
+            "eve.agent.handles": {
+              handles: [
+                {
+                  address: {
+                    continuationToken: "local-token",
+                    kind: "agent/local",
+                    sessionId: "child-local",
+                  },
+                  phase: subagentPhase,
+                },
+                {
+                  address: {
+                    kind: "agent/remote",
+                    sessionId: "child-remote",
+                    url: "https://remote.example",
+                  },
+                  phase: "available",
+                },
+              ],
+            },
             "eve.harness.requestEnvelopeTokens": 2483.5,
             "eve.workflowTool": {
               runs: [
@@ -96,7 +141,7 @@ function eve066Checkpoint({ settled = true }: { readonly settled?: boolean } = {
                   task: {
                     dispatchContext: { auth: { current: null, initiator: null } },
                     metadata: { kind: "tool", name: "report" },
-                    outcome: settled
+                    outcome: settledTask
                       ? { lastOutput: { type: "result", value: "ready" }, status: "completed" }
                       : undefined,
                     taskId: "task-1",
