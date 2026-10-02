@@ -158,11 +158,12 @@ async function bootInitialOwner(
 async function bootHandoffOwner(
   input: HandoffWorkflowEntryInput,
 ): Promise<BootOutcome | undefined> {
-  const { checkpoint, sessionId } = input;
-  const serializedContext = stampSessionIdentity(checkpoint.serializedContext, sessionId);
+  const { sessionId } = input;
   const inbox = createSessionInbox(sessionId);
+  let checkpoint = input.checkpoint;
+  let serializedContext: Record<string, unknown>;
   try {
-    const validation = await validateSessionCheckpointStep({ checkpoint });
+    const validation = await validateSessionCheckpointStep({ checkpoint, sessionId });
     if (validation.kind === "incompatible") {
       const payloads = await inbox.release();
       await signalSessionOwnerActivationStep({
@@ -171,6 +172,8 @@ async function bootHandoffOwner(
       });
       return undefined;
     }
+    checkpoint = validation.checkpoint ?? checkpoint;
+    serializedContext = stampSessionIdentity(checkpoint.serializedContext, sessionId);
     await inbox.claimSessionHooks(
       sessionHookTokens({ serializedContext, sessionState: checkpoint.sessionState }),
     );
