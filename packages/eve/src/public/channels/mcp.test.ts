@@ -631,9 +631,12 @@ const signInResult = (callId: string, ...names: string[]) => ({
 
 /** A core stand-in: `deploy` needs approval (then a sign-in until `signedIn`), `issues` a sign-in. */
 function fakeCore(state: { signedIn?: boolean } = {}) {
-  return vi.fn<InvokeToolFn>(async (name, _input, options) => {
+  return vi.fn<InvokeToolFn>(async (name, input, options) => {
     const nonce = options.key === undefined && { oneOffNonce: "nonce-1" };
     const pause = { callId: options.callId ?? "call_new", ...nonce };
+    if (name === "plain") {
+      return { modelOutput: { type: "json", value: input }, output: input, status: "completed" };
+    }
     if (name === "deploy") {
       if (options.approval === undefined) return { ...pause, status: "approval-required" };
       if (!options.approval.approved) return { reason: "Declined.", status: "denied" };
@@ -664,6 +667,73 @@ function setup(core = fakeCore()) {
 }
 
 describe("mcpChannel tools", () => {
+  it("starts agent_* work as the route caller, not the forwarded principal", async () => {
+    const createSession = vi.fn(async (_input: unknown) => {
+      throw new Error("stop after createSession");
+    });
+    const header = Buffer.from(
+      JSON.stringify({
+        current: {
+          attributes: {},
+          authenticator: "oidc",
+          principalId: "end-user",
+          principalType: "user",
+        },
+      }),
+    ).toString("base64url");
+    await rpc(
+      toolsChannel({ trustedForwarders: () => true }),
+      modernRequest(
+        "tools/call",
+        { arguments: { message: "hello" }, name: "agent_start" },
+        { headers: { "eve-forwarded-principal": header, "x-test-principal": "router" } },
+      ),
+      routeArgs({ createSession: createSession as never, description: toolsDescription }),
+    );
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0]).toMatchObject({ auth: { principalId: "router" } });
+  });
+
+  it("without a secret in production, fails paused calls naming the env var and runs plain ones", async () => {
+    const previous = { env: process.env.EVE_MCP_REQUEST_STATE_SECRET, dev: process.env.EVE_DEV };
+    delete process.env.EVE_MCP_REQUEST_STATE_SECRET;
+    delete process.env.EVE_DEV;
+    try {
+      const channel = toolsChannel({ requestStateSecret: undefined });
+      const args = routeArgs({ description: toolsDescription, invokeTool: fakeCore() });
+      const paused = await rpc(
+        channel,
+        modernRequest("tools/call", { arguments: {}, name: "deploy" }),
+        args,
+      );
+      expect(paused.result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "internal" } },
+      });
+      expect(paused.result?.structuredContent.error.message).toContain(
+        "EVE_MCP_REQUEST_STATE_SECRET",
+      );
+      expect(paused.result?.requestState).toBeUndefined();
+
+      const plain = await rpc(
+        channel,
+        modernRequest("tools/call", { arguments: { x: 2 }, name: "plain" }),
+        args,
+      );
+      expect(plain.result?.structuredContent).toEqual({ x: 2 });
+
+      const echoed = await rpc(
+        channel,
+        modernRequest("tools/call", { arguments: {}, name: "deploy", requestState: "anything" }),
+        args,
+      );
+      expect(echoed.error?.code).toBe(-32_602);
+    } finally {
+      if (previous.env !== undefined) process.env.EVE_MCP_REQUEST_STATE_SECRET = previous.env;
+      if (previous.dev !== undefined) process.env.EVE_DEV = previous.dev;
+    }
+  });
+
   it("publishes tools only with tools: true and skills only with skills: true", async () => {
     const all = [...AGENT_TOOLS, "deploy", "issues", "plain"];
     const rows = [

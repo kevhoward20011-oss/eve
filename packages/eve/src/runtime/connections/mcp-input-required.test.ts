@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createMcpInputRequiredFetch,
@@ -107,4 +107,77 @@ describe("input_required capture at the transport fetch", () => {
     if (!("approve" in plan)) throw new Error(`unexpected plan ${plan.kind}`);
     expect(Object.keys(plan.approve)).toEqual(Object.keys(JSON.parse(captured) as object));
   });
+
+  it("keeps concurrent scopes separate", async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const base = vi.fn(async (_request: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { id: number };
+      if (body.id === 1) {
+        await firstGate;
+        return jsonResponse(inputRequiredMessage(1, "state-a"));
+      }
+      return jsonResponse({ id: 2, jsonrpc: "2.0", result: { content: [] } });
+    });
+    const fetcher = createMcpInputRequiredFetch(base);
+
+    const first = runMcpRequestScope({
+      execute: () => sdkCall(fetcher, toolsCallBody(1)),
+      retry: { requestState: "retry-a" },
+    });
+    const second = runMcpRequestScope({
+      execute: () => sdkCall(fetcher, toolsCallBody(2)),
+      retry: { inputResponses: { b: { action: "decline" } }, requestState: "retry-b" },
+    });
+    await expect(second).resolves.toMatchObject({ status: "completed" });
+    releaseFirst();
+    await expect(first).resolves.toMatchObject({
+      requestState: "state-a",
+      status: "input_required",
+    });
+
+    const sent = base.mock.calls.map(
+      ([, init]) =>
+        JSON.parse(String(init?.body)) as { id: number; params: Record<string, unknown> },
+    );
+    const a = sent.find((m) => m.id === 1)!;
+    const b = sent.find((m) => m.id === 2)!;
+    expect(a.params["requestState"]).toBe("retry-a");
+    expect(a.params).not.toHaveProperty("inputResponses");
+    expect(b.params["requestState"]).toBe("retry-b");
+    expect(b.params["inputResponses"]).toEqual({ b: { action: "decline" } });
+  });
 });
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+}
+
+function inputRequiredMessage(id: number, requestState: string) {
+  return {
+    id,
+    jsonrpc: "2.0",
+    result: {
+      inputRequests: { approve: JSON.parse(FORM) },
+      requestState,
+      resultType: "input_required",
+    },
+  };
+}
+
+function toolsCallBody(id: number): string {
+  return JSON.stringify({
+    id,
+    jsonrpc: "2.0",
+    method: "tools/call",
+    params: { arguments: {}, name: "danger" },
+  });
+}
+
+async function sdkCall(fetcher: typeof fetch, body: string): Promise<unknown> {
+  const text = await (await fetcher("https://mcp.example.com", { body, method: "POST" })).text();
+  if (text.includes("input_required")) throw new Error("SDK: unknown result");
+  return text;
+}

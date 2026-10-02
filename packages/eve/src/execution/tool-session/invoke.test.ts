@@ -1,3 +1,4 @@
+import { jsonSchema } from "ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Approval, ApprovalPolicy } from "#approval/definition.js";
@@ -425,5 +426,61 @@ describe("tool-session sandbox races", () => {
 
     expect(result.deleted).toEqual([]);
     expect(await held).toMatchObject({ output: "held", status: "completed" });
+  });
+
+  it("returns a throwing validator's error as generic with its error id, but schema failures verbatim", async () => {
+    const execute = vi.fn();
+    const runtime = runtimeWith([
+      tool("throws", execute, {
+        inputSchema: jsonSchema(
+          { type: "object" },
+          {
+            validate: () => {
+              throw new Error("vault lookup failed: token=sk_live_secret at 10.1.2.3");
+            },
+          },
+        ),
+      }),
+      tool("rejects", execute, {
+        inputSchema: jsonSchema(
+          { type: "object" },
+          { validate: () => ({ error: new Error("path: expected a string"), success: false }) },
+        ),
+      }),
+    ]);
+
+    const threw = await call(runtime, "throws", {});
+    expect(threw.status).toBe("failed");
+    if (threw.status !== "failed") return;
+    expect(threw.errorId).toBeTruthy();
+    expect(threw.message).toBe(
+      `Tool "throws" failed: input validation failed. The error is logged with id ${threw.errorId}.`,
+    );
+    expect(JSON.stringify(threw)).not.toMatch(/sk_live_secret|10\.1\.2\.3|vault/);
+
+    expect(await call(runtime, "rejects", {})).toEqual({
+      message: 'Invalid input for tool "rejects": path: expected a string',
+      status: "invalid-input",
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("returns an unexpected error as a generic message with the error id it logged", async () => {
+    const runtime = runtimeWith([
+      tool("boom", () => {
+        throw new Error("connect ECONNREFUSED 10.0.0.7:5432 password=hunter2");
+      }),
+    ]);
+
+    const result = await call(runtime, "boom", {});
+
+    expect(result.status).toBe("failed");
+    if (result.status !== "failed") return;
+    expect(result.errorId).toBeTruthy();
+    expect(result.message).toBe(
+      `Tool "boom" failed: tool execution failed. The error is logged with id ${result.errorId}.`,
+    );
+    expect(result.message).not.toContain("hunter2");
+    expect(result.message).not.toContain("10.0.0.7");
   });
 });
