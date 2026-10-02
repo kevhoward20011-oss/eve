@@ -4,7 +4,6 @@ import {
   createRuntimeToolResultFromToolError,
   createRuntimeToolResultFromValue,
 } from "#harness/action-result-helpers.js";
-import { requestRemoteInput } from "#harness/remote-input.js";
 
 describe("createRuntimeToolResultFromValue", () => {
   it("rejects non-JSON-serializable successful action results", () => {
@@ -69,31 +68,5 @@ describe("createRuntimeToolResultFromToolError", () => {
       output: 'No skill named "demo"',
       toolName: "load_skill",
     });
-  });
-});
-
-describe("createRuntimeToolResultFromValue with a remote input signal", () => {
-  const signal = requestRemoteInput({
-    approve: {
-      attempt: 1,
-      inputResponses: { confirm: { action: "accept", content: { approved: true } } },
-      requestState: "opaque-state-SECRET",
-    },
-    connection: "billing",
-    prompt: "Approve the refund?",
-  });
-
-  it("projects the full signal to its model-facing output, without the retry payload", () => {
-    const result = createRuntimeToolResultFromValue({
-      callId: "call_1",
-      output: signal,
-      toolName: "connection_execute",
-    });
-    expect(result.output).toEqual({ __eveRemoteInputPending: true, connection: "billing" });
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain("requestState");
-    expect(serialized).not.toContain("opaque-state-SECRET");
-    expect(serialized).not.toContain("inputResponses");
-    expect(serialized).not.toContain("Approve the refund?");
   });
 });

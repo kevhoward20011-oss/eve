@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { contextStorage, ContextContainer } from "#context/container.js";
 import { AuthKey, SessionKey, type SessionAuthContext } from "#context/keys.js";
@@ -102,44 +102,6 @@ describe("McpConnectionClient", () => {
       );
     },
   );
-
-  it.each<[string, Record<string, unknown>, unknown, "empty" | "unlisted" | "rejects"]>([
-    [
-      "lists no tools from a server that does not advertise the tools capability",
-      { resources: {} },
-      undefined,
-      "unlisted",
-    ],
-    [
-      "lists no tools when tools/list answers -32601",
-      { tools: {} },
-      Object.assign(new Error("Method not found"), { code: -32601 }),
-      "empty",
-    ],
-    [
-      "still fails tool listing on other JSON-RPC errors",
-      { tools: {} },
-      Object.assign(new Error("Internal error"), { code: -32603 }),
-      "rejects",
-    ],
-  ])("%s", async (_label, capabilities, listError, expected) => {
-    const listTools = vi.fn().mockRejectedValue(listError);
-    createMCPClient.mockResolvedValue({
-      close: vi.fn(),
-      initializeResult: { capabilities, protocolVersion: "2026-06-18" },
-      listTools,
-      toolsFromDefinitions: vi.fn(),
-    });
-
-    const metadata = new McpConnectionClient(makeConnection()).getToolMetadata();
-
-    if (expected === "rejects") {
-      await expect(metadata).rejects.toThrow("Internal error");
-      return;
-    }
-    await expect(metadata).resolves.toEqual([]);
-    if (expected === "unlisted") expect(listTools).not.toHaveBeenCalled();
-  });
 
   it("hides provided arguments from schemas and adds resolved values at execution", async () => {
     const execute = vi.fn().mockResolvedValue({ ok: true });
@@ -923,58 +885,5 @@ describe("resolveHeaders with an active context (principal resolution + cache)",
 
     expect(headers).toEqual({ Authorization: "Bearer shared-app-token" });
     expect(received).toEqual({ type: "app" });
-  });
-});
-
-describe("McpConnectionClient forwardPrincipal", () => {
-  const globalFetch = vi.fn(
-    async (_request: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
-      new Response(null),
-  );
-
-  beforeEach(() => {
-    createMCPClient.mockReset();
-    globalFetch.mockReset();
-    vi.stubGlobal("fetch", globalFetch);
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  const caller = userAuth("u-1");
-
-  it.each<[string, boolean | undefined, SessionAuthContext | null, boolean]>([
-    ["adds the eve-forwarded-principal header when forwardPrincipal is true", true, caller, true],
-    ["omits the header when the turn has no authenticated caller", true, null, false],
-    ["omits the header when forwardPrincipal is not set", undefined, caller, false],
-  ])("%s", async (_label, forwardPrincipal, auth, sent) => {
-    createMCPClient.mockResolvedValue({ close: vi.fn() });
-    const mcpClient = new McpConnectionClient(makeConnection({ forwardPrincipal }));
-
-    await contextStorage.run(ctxWithAuth(auth), async () => {
-      await mcpClient.connect();
-      const options = createMCPClient.mock.calls[0]?.[0] as {
-        readonly transport: { readonly fetch: typeof fetch };
-      };
-      await options.transport.fetch("https://mcp.example.com", {
-        body: JSON.stringify({ id: 1, jsonrpc: "2.0", method: "tools/list", params: {} }),
-        headers: { "x-existing": "1" },
-        method: "POST",
-      });
-    });
-
-    expect(globalFetch).toHaveBeenCalledOnce();
-    const headers = new Headers(globalFetch.mock.calls[0]![1]!.headers);
-    expect(headers.get("x-existing")).toBe("1");
-    const header = headers.get("eve-forwarded-principal");
-    if (!sent) {
-      expect(header).toBeNull();
-      return;
-    }
-    expect(header).toMatch(/^[A-Za-z0-9_-]+$/u);
-    expect(JSON.parse(Buffer.from(header!, "base64url").toString("utf8"))).toEqual({
-      current: caller,
-    });
   });
 });

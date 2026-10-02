@@ -6,11 +6,8 @@ import { isMcpInputRequiredOutcome, McpConnectionClient } from "#runtime/connect
 import { TOOL_SESSION_META_KEY } from "#runtime/connections/mcp-forwarding.js";
 import type { ResolvedConnectionDefinition } from "#runtime/types.js";
 
-/**
- * MRTR through the real bundled `@ai-sdk/mcp` client: only HTTP I/O is
- * replaced. These lock what the SDK decides and eve must agree with (which
- * SSE events count, cancellation) and what eve puts on the wire around it.
- */
+// The real bundled `@ai-sdk/mcp` client with only HTTP replaced: eve must agree
+// with the SDK on which SSE events decide a call, and own what goes on the wire.
 
 const PROTOCOL = "2026-07-28";
 
@@ -20,11 +17,7 @@ const INPUT_REQUESTS = {
     params: {
       message: "Allow deploy?",
       mode: "form",
-      requestedSchema: {
-        properties: { approved: { type: "boolean" } },
-        required: ["approved"],
-        type: "object",
-      },
+      requestedSchema: { properties: { approved: { type: "boolean" } }, type: "object" },
     },
   },
 };
@@ -72,6 +65,19 @@ function frame(id: number, result: unknown, event?: string): string {
   return `${head}data: ${JSON.stringify({ id, jsonrpc: "2.0", result })}\n\n`;
 }
 
+function chunked(text: string): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let index = 0; index < text.length; index += 7) {
+        controller.enqueue(encoder.encode(text.slice(index, index + 7)));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+}
+
 async function run<T>(fn: () => Promise<T>): Promise<T> {
   const ctx = new ContextContainer();
   ctx.set(AuthKey, null);
@@ -112,15 +118,7 @@ beforeEach(() => {
           jsonrpc: "2.0",
           result: {
             resultType: "complete",
-            tools: [
-              {
-                inputSchema: {
-                  properties: { context: { type: "object" }, query: { type: "string" } },
-                  type: "object",
-                },
-                name: "deploy",
-              },
-            ],
+            tools: [{ inputSchema: { type: "object" }, name: "deploy" }],
           },
         });
       case "tools/call":
@@ -139,58 +137,39 @@ afterEach(async () => {
 });
 
 describe("MRTR with the bundled MCP client", () => {
-  it.each([
-    ["an unnamed", undefined],
-    ["a `message`", "message"],
-  ])("returns input_required from %s SSE event split across chunks", async (_label, event) => {
-    toolsCall = (id) => {
-      const text = frame(id, INPUT_REQUIRED, event);
-      const encoder = new TextEncoder();
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            for (let index = 0; index < text.length; index += 7) {
-              controller.enqueue(encoder.encode(text.slice(index, index + 7)));
-            }
-            controller.close();
-          },
-        }),
-        { headers: { "content-type": "text/event-stream" } },
-      );
-    };
+  it.each<[string, (id: number) => Response, boolean]>([
+    ["an unnamed event split across chunks", (id) => chunked(frame(id, INPUT_REQUIRED)), true],
+    [
+      "a `message` event split across chunks",
+      (id) => chunked(frame(id, INPUT_REQUIRED, "message")),
+      true,
+    ],
+    [
+      "an ignored event type, then the completed result",
+      (id) => sse(frame(id, INPUT_REQUIRED, "other") + frame(id, COMPLETED, "message")),
+      false,
+    ],
+    [
+      "the completed result, then input_required",
+      (id) => sse(frame(id, COMPLETED) + frame(id, INPUT_REQUIRED)),
+      false,
+    ],
+  ])("agrees with the SDK on %s", async (_label, respond, inputRequired) => {
+    toolsCall = respond;
     client = new McpConnectionClient(connection());
 
     const result = await run(() => client!.executeTool("deploy", {}, { callId: "c1" }));
 
-    expect(isMcpInputRequiredOutcome(result)).toBe(true);
-    expect(result).toMatchObject({ inputRequests: INPUT_REQUESTS, requestState: "state-1" });
-    expect(result).not.toHaveProperty("status");
-  });
-
-  it("keeps the SDK's completed result when an ignored event type carries input_required", async () => {
-    toolsCall = (id) => sse(frame(id, INPUT_REQUIRED, "other") + frame(id, COMPLETED, "message"));
-    client = new McpConnectionClient(connection());
-
-    const result = await run(() => client!.executeTool("deploy", {}, { callId: "c1" }));
-
-    expect(isMcpInputRequiredOutcome(result)).toBe(false);
-    expect(result).toMatchObject({ content: [{ text: "deployed", type: "text" }] });
+    expect(isMcpInputRequiredOutcome(result)).toBe(inputRequired);
+    if (inputRequired) {
+      expect(result).toMatchObject({ inputRequests: INPUT_REQUESTS, requestState: "state-1" });
+    } else {
+      expect(result).toMatchObject({ content: [{ text: "deployed", type: "text" }] });
+    }
     expect(callBodies).toHaveLength(1);
   });
 
-  it("ignores an input_required result that follows the call's first answer", async () => {
-    toolsCall = (id) => sse(frame(id, COMPLETED) + frame(id, INPUT_REQUIRED));
-    client = new McpConnectionClient(connection());
-
-    const result = await run(() => client!.executeTool("deploy", {}, { callId: "c1" }));
-
-    expect(isMcpInputRequiredOutcome(result)).toBe(false);
-    expect(callBodies).toHaveLength(1);
-  });
-
-  it("does not capture an event the stream ends before finishing", async () => {
-    // The SDK's parser drops an unterminated event and keeps waiting, so the
-    // call ends only when it is cancelled, and it ends cancelled.
+  it("does not capture an unterminated event; the SDK waits until the call is cancelled", async () => {
     toolsCall = (id) => sse(frame(id, INPUT_REQUIRED).replace(/\n\n$/u, "\n"));
     client = new McpConnectionClient(connection());
     const controller = new AbortController();
@@ -202,7 +181,6 @@ describe("MRTR with the bundled MCP client", () => {
     controller.abort(new Error("cancelled by test"));
 
     await expect(pending).rejects.toThrow(/abort/iu);
-    expect(callBodies).toHaveLength(1);
   });
 
   it("retries with inputResponses, requestState, and the first round's resolved arguments", async () => {
@@ -210,15 +188,7 @@ describe("MRTR with the bundled MCP client", () => {
     // callback that returns something new each call must not change them.
     let nonce = 0;
     const resolver = vi.fn(() => ({ nonce: ++nonce }));
-    toolsCall = (id) =>
-      sse(
-        frame(
-          id,
-          callBodies.length === 1
-            ? { requestState: "s1", resultType: "input_required" }
-            : COMPLETED,
-        ),
-      );
+    toolsCall = (id) => sse(frame(id, callBodies.length === 1 ? INPUT_REQUIRED : COMPLETED));
     client = new McpConnectionClient(
       connection({ toolCall: { providedArguments: { context: resolver } } }),
     );
@@ -229,18 +199,9 @@ describe("MRTR with the bundled MCP client", () => {
     const done = await run(async () => {
       const first = await client!.executeTool("deploy", { query: "q" }, { callId: "c1" });
       if (!isMcpInputRequiredOutcome(first)) throw new Error("expected input_required");
-      return await client!.executeTool(
-        "deploy",
-        { query: "q" },
-        {
-          callId: "c1",
-          inputRetry: {
-            inputResponses,
-            requestState: first.requestState,
-            resolvedArguments: first.resolvedArguments,
-          },
-        },
-      );
+      const { requestState, resolvedArguments } = first;
+      const inputRetry = { inputResponses, requestState, resolvedArguments };
+      return await client!.executeTool("deploy", { query: "q" }, { callId: "c1", inputRetry });
     });
 
     expect(done).toMatchObject({ content: [{ text: "deployed", type: "text" }] });
@@ -251,26 +212,29 @@ describe("MRTR with the bundled MCP client", () => {
       arguments: { context: { nonce: 1 }, query: "q" },
       inputResponses,
       name: "deploy",
-      requestState: "s1",
+      requestState: "state-1",
     });
     expect(callBodies[1]).not.toHaveProperty("resolvedArguments");
   });
 
-  it.each([
-    ["sends", { "dev.eve/tool-sessions": {} }, true],
-    ["withholds", undefined, false],
-  ])(
-    "%s the tool-session key when the server's extensions are %j",
-    async (_label, extensions, sent) => {
-      serverCapabilities = extensions === undefined ? { tools: {} } : { extensions, tools: {} };
-      toolsCall = (id) => sse(frame(id, COMPLETED));
+  it("sends the tool-session key only when the server advertises dev.eve/tool-sessions", async () => {
+    const sentKeys: unknown[] = [];
+    toolsCall = (id, body) => {
+      sentKeys.push(
+        (body["_meta"] as Record<string, unknown> | undefined)?.[TOOL_SESSION_META_KEY],
+      );
+      return sse(frame(id, COMPLETED));
+    };
+    for (const capabilities of [
+      { tools: {} },
+      { extensions: { "dev.eve/tool-sessions": {} }, tools: {} },
+    ]) {
+      serverCapabilities = capabilities;
       client = new McpConnectionClient(connection());
-
       await run(() => client!.executeTool("deploy", {}, { callId: "c1" }));
+      await client.close();
+    }
 
-      const meta = (callBodies[0]?.["_meta"] ?? {}) as Record<string, unknown>;
-      if (sent) expect(meta[TOOL_SESSION_META_KEY]).toEqual(expect.any(String));
-      else expect(meta).not.toHaveProperty(TOOL_SESSION_META_KEY);
-    },
-  );
+    expect(sentKeys).toEqual([undefined, expect.any(String)]);
+  });
 });

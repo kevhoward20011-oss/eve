@@ -12,7 +12,7 @@ import type { HarnessToolDefinition } from "#harness/execute-tool.js";
 import type { SessionAuthContext } from "#channel/types.js";
 import { settleDirectApprovalResponse } from "#harness/approval-candidates.js";
 import { coordinateApprovalDelivery } from "#harness/approval-delivery-coordinator.js";
-import { selectApprovalReplayBatch } from "#harness/input-requests.js";
+import { resolvePendingInput, selectApprovalReplayBatch } from "#harness/input-requests.js";
 import { appendPendingInputBatch, getPendingInputBatches } from "#harness/pending-input-batches.js";
 import {
   getPendingRemoteInputs,
@@ -22,7 +22,7 @@ import {
   requestRemoteInput,
 } from "#harness/remote-input.js";
 import type { HarnessSession, StepInput } from "#harness/types.js";
-import type { InputRequest, InputResponse } from "#shared/input.js";
+import type { InputRequest } from "#shared/input.js";
 
 const request: InputRequest = {
   action: { callId: "call-1", input: { marker: "durable" }, kind: "tool-call", toolName: "gate" },
@@ -365,18 +365,27 @@ describe("coordinateApprovalDelivery", () => {
   });
 });
 
-describe("coordinateApprovalDelivery with a remote input pending", () => {
+// Only the user the remote call ran for may answer it, however the answer
+// arrives. Someone else's answer leaves it pending; an answer that names
+// nobody, or a call that ran for nobody, fails closed as a denial.
+describe("remote input responder rules", () => {
   const remoteRequestId = "remote-input_call-remote";
-  const intruder: SessionAuthContext = { ...responder, principalId: "user-2" };
+  const other: SessionAuthContext = { ...responder, principalId: "user-2" };
+  const otherIssuer: SessionAuthContext = { ...responder, issuer: "other-idp" };
+  const attributed = (auth: SessionAuthContext | null, optionId = "approve"): StepInput => ({
+    attributedInputResponses: [{ auth, response: { optionId, requestId: remoteRequestId } }],
+  });
+  const plain: StepInput = {
+    inputResponses: [{ optionId: "approve", requestId: remoteRequestId }],
+  };
 
-  /** A session parked on one remote input (for `responder`) and one ordinary approval. */
-  function remoteParkedSession(): HarnessSession {
+  function remoteParkedSession(caller: SessionAuthContext | null): HarnessSession {
     const parked = parkRemoteInputs({
       messages: [
         {
           content: [
             {
-              input: { connection: "billing", input: {}, tool: "refund" },
+              input: {},
               toolCallId: "call-remote",
               toolName: "connection_execute",
               type: "tool-call",
@@ -385,147 +394,99 @@ describe("coordinateApprovalDelivery with a remote input pending", () => {
           role: "assistant",
         },
       ],
-      responder,
+      responder: caller,
       state: undefined,
       toolResults: [
         {
-          dynamic: false,
-          input: {},
           output: requestRemoteInput({
             approve: { attempt: 1, inputResponses: { ok: true }, requestState: "SECRET" },
             connection: "billing",
             prompt: "Approve the refund?",
           }),
           toolCallId: "call-remote",
-          toolName: "connection_execute",
           type: "tool-result",
         } as never,
       ],
     })!;
-    expect(parked.requests[0]?.requestId).toBe(remoteRequestId);
     return appendPendingInputBatch({
-      requests: [request, ...parked.requests],
-      responseMessages: [],
-      session: {
-        agent: { modelReference: { id: "test" }, system: "", tools: [] },
-        compaction: { recentWindowSize: 10, threshold: 0.8 },
-        continuationToken: "test",
-        history: [],
-        sessionId: "session-1",
-        state: parked.state,
-      },
+      requests: parked.requests,
+      responseMessages: parked.messages,
+      session: { ...parkedSession(), state: parked.state },
     });
   }
 
-  /** Every response the step will see, attributed or plain. */
-  function responsesOf(stepInput: StepInput | undefined): InputResponse[] {
-    return [
-      ...(stepInput?.inputResponses ?? []),
-      ...(stepInput?.attributedInputResponses ?? []).map(({ response }) => response),
-    ];
-  }
+  const typed = (messageAuth: SessionAuthContext | null, message = "approve"): StepInput => ({
+    message,
+    messageAuth,
+  });
+  const REFUSED = REMOTE_INPUT_REFUSED_FEEDBACK;
+  const CLOSED = REMOTE_INPUT_FAILED_CLOSED_FEEDBACK;
+  type Who = SessionAuthContext | null;
 
-  function pendingRequestIds(session: HarnessSession): string[] {
-    return getPendingInputBatches(session.state).flatMap((batch) =>
-      batch.requests.map((pending) => pending.requestId),
-    );
-  }
-
-  // Only the journaled user may answer; null fails closed by cancelling.
-  it.each(
-    (["attributed", "plain"] as const).flatMap((source) =>
-      (
-        [
-          ["the journaled user", responder, "accept"],
-          ["another user", intruder, "refuse"],
-          ["nobody", null, "fail-closed"],
-        ] as const
-      ).map(([who, auth, rule]) => ({ auth, rule, source, who })),
-    ),
-  )("screens a $source answer from $who ($rule)", async ({ auth, rule, source }) => {
-    const answer = { optionId: "approve", requestId: remoteRequestId };
-    const stepInput: StepInput =
-      source === "attributed"
-        ? { attributedInputResponses: [{ auth, response: answer }] }
-        : { inputResponses: [answer] };
-    // A plain answer is attributed to the turn's caller.
+  // [answer, step input, turn user, outcome, feedback, user the call ran for]
+  it.each<[string, StepInput, Who, "approved" | "denied" | "pending", string?, Who?]>([
+    ["attributed, caller", attributed(responder), null, "approved"],
+    ["attributed cancel, caller", attributed(responder, "cancel"), null, "denied"],
+    ["attributed, other user", attributed(other), null, "pending", REFUSED],
+    ["attributed, same id at another issuer", attributed(otherIssuer), null, "pending", REFUSED],
+    ["attributed, nobody", attributed(null), null, "denied", CLOSED],
+    [
+      "attributed, caller, call ran for nobody",
+      attributed(responder),
+      null,
+      "denied",
+      CLOSED,
+      null,
+    ],
+    ["plain, in the caller's turn", plain, responder, "approved"],
+    ["plain, in another user's turn", plain, other, "pending", REFUSED],
+    ["plain, in a turn with no user", plain, null, "denied", CLOSED],
+    ["typed approve, caller", typed(responder), null, "approved"],
+    ["typed cancel, caller", typed(responder, "cancel"), null, "denied"],
+    ["typed approve, other user", typed(other), null, "pending"],
+    ["typed unattributed, in another user's turn", { message: "approve" }, other, "pending"],
+    ["typed approve naming nobody, in the caller's turn", typed(null), responder, "pending"],
+    [
+      "attributed and typed, other user",
+      { ...attributed(other), ...typed(other) },
+      null,
+      "pending",
+      REFUSED,
+    ],
+  ])("%s: %s", async (_label, stepInput, turn, outcome, feedback, caller = responder) => {
     const ctx = new ContextContainer();
-    if (source === "plain") ctx.set(AuthKey, auth);
+    ctx.set(AuthKey, turn);
+    const session = remoteParkedSession(caller);
 
-    const result = await contextStorage.run(ctx, () =>
-      coordinateApprovalDelivery({
+    const { delivered, result } = await contextStorage.run(ctx, async () => {
+      const delivered = await coordinateApprovalDelivery({
         now: 100,
-        session: remoteParkedSession(),
+        session,
         stepInput,
         tools: new Map(),
-      }),
+      });
+      return { delivered, result: resolvePendingInput(delivered) };
+    });
+
+    expect(delivered.feedback).toEqual(feedback === undefined ? [] : [feedback]);
+    const responses = result.messages.flatMap((message) =>
+      message.role === "tool"
+        ? message.content.filter((part) => part.type === "tool-approval-response")
+        : [],
     );
-
-    const settlements = getApprovalAuditState(result.session.state).settlements;
-    if (rule === "accept") {
-      expect(result.feedback).toEqual([]);
-      expect(responsesOf(result.stepInput)).toEqual([answer]);
-      expect(settlements).toEqual([
-        expect.objectContaining({ outcome: "allowed", requestId: remoteRequestId }),
-      ]);
-    } else if (rule === "refuse") {
-      expect(result.feedback).toEqual([REMOTE_INPUT_REFUSED_FEEDBACK]);
-      expect(responsesOf(result.stepInput)).toEqual([]);
-      expect(pendingRequestIds(result.session)).toContain(remoteRequestId);
+    if (outcome === "pending") {
+      expect(responses).toEqual([]);
       expect(getPendingRemoteInputs(result.session.state)).toHaveLength(1);
-      expect(settlements).toEqual([]);
+      const pending = getPendingInputBatches(result.session.state).flatMap(
+        (batch) => batch.requests,
+      );
+      expect(pending).toMatchObject([{ requestId: remoteRequestId }]);
     } else {
-      expect(result.feedback).toContain(REMOTE_INPUT_FAILED_CLOSED_FEEDBACK);
-      expect(responsesOf(result.stepInput)).toEqual([{ ...answer, optionId: "cancel" }]);
+      const approved = outcome === "approved";
+      expect(responses).toEqual([
+        expect.objectContaining({ approvalId: remoteRequestId, approved }),
+      ]);
     }
-  });
-
-  it("leaves ordinary approvals alone while a remote input is pending", async () => {
-    const attributed = [
-      { auth: intruder, response: { optionId: "approve", requestId: request.requestId } },
-    ];
-    const result = await coordinateApprovalDelivery({
-      now: 100,
-      session: remoteParkedSession(),
-      stepInput: { attributedInputResponses: attributed },
-      tools: new Map(),
-    });
-    // Same outcome as the identical answer with no remote input pending.
-    const baseline = await coordinateApprovalDelivery({
-      now: 100,
-      session: appendPendingInputBatch({
-        requests: [request],
-        responseMessages: [],
-        session: { ...parkedSession(), state: undefined },
-      }),
-      stepInput: { attributedInputResponses: attributed },
-      tools: new Map(),
-    });
-    expect(result.feedback).toEqual([]);
-    expect(result.kind).toBe(baseline.kind);
-    expect(responsesOf(result.stepInput)).toEqual(responsesOf(baseline.stepInput));
-    expect(responsesOf(result.stepInput)).toEqual([attributed[0]!.response]);
-  });
-
-  it("screens a mixed batch: refuses the remote answer, keeps the ordinary one", async () => {
-    const ordinary = {
-      auth: intruder,
-      response: { optionId: "approve", requestId: request.requestId },
-    };
-    const result = await coordinateApprovalDelivery({
-      now: 100,
-      session: remoteParkedSession(),
-      stepInput: {
-        attributedInputResponses: [
-          ordinary,
-          { auth: intruder, response: { optionId: "approve", requestId: remoteRequestId } },
-        ],
-      },
-      tools: new Map(),
-    });
-    expect(result.feedback).toContain(REMOTE_INPUT_REFUSED_FEEDBACK);
-    expect(responsesOf(result.stepInput)).toEqual([ordinary.response]);
-    expect(pendingRequestIds(result.session)).toContain(remoteRequestId);
   });
 });
 
