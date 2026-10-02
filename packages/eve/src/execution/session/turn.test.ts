@@ -483,6 +483,7 @@ describe("SessionExecution checkpoints", () => {
       .mockImplementation(
         turnStepWork(async () => ({
           action: "park",
+          hasRunsToDispatch: true,
           pendingCoordinationCallIds: ["hold-call"],
           serializedContext: {},
           sessionState,
@@ -586,6 +587,7 @@ describe("SessionExecution checkpoints", () => {
       .mockImplementationOnce(
         turnStepWork(async () => ({
           action: "park",
+          hasRunsToDispatch: true,
           pendingCoordinationCallIds: ["hold-call"],
           serializedContext: {},
           sessionState,
@@ -803,6 +805,7 @@ describe("SessionExecution checkpoints", () => {
     vi.mocked(turnStep).mockImplementation(
       turnStepWork(async () => ({
         action: "park",
+        hasRunsToDispatch: true,
         pendingCoordinationCallIds: ["child-call"],
         serializedContext: {},
         sessionState,
@@ -878,6 +881,7 @@ describe("SessionExecution checkpoints", () => {
       .mockImplementation(
         turnStepWork(async () => ({
           action: "park",
+          hasRunsToDispatch: true,
           pendingCoordinationCallIds: ["deploy-call"],
           serializedContext: {},
           sessionState,
@@ -961,6 +965,7 @@ describe("SessionExecution checkpoints", () => {
       .mockImplementation(
         turnStepWork(async () => ({
           action: "park",
+          hasRunsToDispatch: false,
           pendingCoordinationCallIds: ["wait-call"],
           pendingTaskToolCalls: [{ callId: "wait-call", kind: "task_wait" }],
           serializedContext: {},
@@ -1045,6 +1050,7 @@ describe("SessionExecution checkpoints", () => {
       .mockImplementation(
         turnStepWork(async () => ({
           action: "park",
+          hasRunsToDispatch: true,
           pendingCoordinationCallIds: ["hold-call"],
           serializedContext: {},
           sessionState,
@@ -1138,6 +1144,7 @@ describe("SessionExecution checkpoints", () => {
       .mockImplementationOnce(
         turnStepWork(async () => ({
           action: "park",
+          hasRunsToDispatch: true,
           pendingCoordinationCallIds: tools.map((name) => `${name}-call`),
           serializedContext: {},
           sessionState,
@@ -1221,6 +1228,7 @@ describe("SessionExecution checkpoints", () => {
       .mockImplementationOnce(
         turnStepWork(async () => ({
           action: "park",
+          hasRunsToDispatch: false,
           pendingCoordinationCallIds: ["wait-call"],
           pendingTaskToolCalls: [{ callId: "wait-call", kind: "task_wait" }],
           serializedContext: {},
@@ -1316,6 +1324,7 @@ describe("SessionExecution checkpoints", () => {
       .mockImplementation(
         turnStepWork(async () => ({
           action: "park",
+          hasRunsToDispatch: true,
           pendingCoordinationCallIds: ["hold-call"],
           serializedContext: {},
           sessionState,

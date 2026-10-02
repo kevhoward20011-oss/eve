@@ -82,13 +82,12 @@ export async function notifyTurnCallerStep(input: {
 
 /** Settles a workflow-owned caller after the child turn is cooperatively cancelled. */
 export async function notifyCancelledTaskCallerStep(input: {
-  readonly caller: TurnCaller | undefined;
+  readonly caller: TurnCaller;
   readonly sessionId: string;
   readonly usage?: TokenUsage;
 }): Promise<void> {
   "use step";
 
-  if (input.caller === undefined) return;
   const usageDelta = input.usage ?? ZERO_TOKEN_USAGE;
   const error = {
     code: SUBAGENT_EXECUTION_FAILED,
@@ -204,8 +203,9 @@ export async function resolveInitialTurnCallerStep(input: {
 }
 
 /**
- * Rebinds child event forwarding to the caller that owns the next accepted
- * turn. `turnStep` applies it inline, so binding costs no durable step.
+ * Points child event forwarding at the caller that owns the next accepted turn,
+ * so the turn's input requests and progress reach that caller and not the
+ * previous one.
  */
 export function bindTurnCallerContext(
   caller: TurnCaller | undefined,

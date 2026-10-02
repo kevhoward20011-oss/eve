@@ -198,19 +198,15 @@ async function runSessionStep(input: TurnStepInput): Promise<DurableStepResult> 
     sessionId: initialSession.sessionId,
   });
   const initialEmissionState = getHarnessEmissionState(initialSession.state);
-  let titleWrite: Promise<void> | undefined;
+  let newSessionTitle: string | undefined;
   if (
     !initialEmissionState.sessionStarted &&
     !ctx.has(SessionTitleKey) &&
     !ctx.has(ParentSessionKey)
   ) {
     const message = rawDelivery?.payloads.find((payload) => payload.message !== undefined)?.message;
-    const title = deriveSessionTitle(rawDelivery?.title ?? message);
-    if (title !== undefined) {
-      ctx.set(SessionTitleKey, title);
-      // Settled in the `finally` below, so the write overlaps the rest of the step.
-      titleWrite = setEveAttributes({ "$eve.title": title });
-    }
+    newSessionTitle = deriveSessionTitle(rawDelivery?.title ?? message);
+    if (newSessionTitle !== undefined) ctx.set(SessionTitleKey, newSessionTitle);
   }
 
   if (rawDelivery !== undefined) {
@@ -261,6 +257,10 @@ async function runSessionStep(input: TurnStepInput): Promise<DurableStepResult> 
     input.abortSignal === undefined
       ? hookCancellation.signal
       : AbortSignal.any([input.abortSignal, hookCancellation.signal]);
+  // Overlaps the rest of the step. It never rejects, and the `finally` settles it
+  // so it cannot outlive the step.
+  const titleWrite =
+    newSessionTitle === undefined ? undefined : setEveAttributes({ "$eve.title": newSessionTitle });
   try {
     const dynamicConnections = bindDynamicConnections(ctx, bundle.resolvedAgent);
     const effectiveNode = { ...bundle.graph.root, turnAgent: effectiveAgent.turnAgent };

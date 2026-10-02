@@ -86,8 +86,8 @@ export class SessionExecution {
     delivery: TurnStepPayload | undefined,
     options: {
       /**
-       * The delegated caller the turn answers. The session binds it before the
-       * turn, including for a first turn whose input carries no caller.
+       * The delegated caller the turn answers, including for a first turn whose
+       * input carries no caller. The turn's first step binds it into the context.
        */
       readonly caller?: TurnCaller;
     } = {},
@@ -138,7 +138,9 @@ export class SessionExecution {
     delivery: TurnStepPayload | undefined,
   ): Promise<TurnOutcome> {
     let nextStepInput: TurnStepPayload | undefined = delivery;
-    // The turn's first step binds its caller into the context; later steps carry the bound context.
+    // Only the first step binds the caller. A caller that steers in mid-turn is
+    // replied to at its own address (`TurnOutcome.caller`) and is bound by the
+    // next turn, so this turn's forwarding keeps its original caller.
     let bindCaller = turn.caller;
 
     while (true) {
@@ -199,29 +201,13 @@ export class SessionExecution {
       }
 
       if (pendingCallIds !== undefined && result.action === "park") {
-        const taskToolCalls = result.pendingTaskToolCalls ?? [];
-        // Task tool calls are answered by the session, not dispatched, so a batch of
-        // only those has nothing for the dispatch step to start.
-        const dispatchesRuns = pendingCallIds.length > taskToolCalls.length;
-        const dispatchResults = dispatchesRuns
-          ? (
-              await cursor.advance((state) =>
-                dispatchCoordinationStep({
-                  action: result.action,
-                  workflowToolRunOwner: {
-                    inbox: sessionInboxHookToken(sessionCommandHookToken(this.input.sessionId)),
-                  },
-                  ...state,
-                }),
-              )
-            ).results
-          : [];
+        const dispatchResults = result.hasRunsToDispatch === true ? await this.dispatchRuns() : [];
         const initialAcceptedAtMs = dispatchResults.length === 0 ? undefined : Date.now();
 
         const runtimeResults = await this.waitForRuntimeActionResults({
           initialAcceptedAtMs,
           initialResults: dispatchResults,
-          taskToolCalls,
+          taskToolCalls: result.pendingTaskToolCalls ?? [],
           pendingCallIds,
           turn,
         });
@@ -237,6 +223,24 @@ export class SessionExecution {
       const steering = await turn.takeSteering();
       nextStepInput = steering === undefined ? undefined : { delivery: steering };
     }
+  }
+
+  /**
+   * Starts the workflow tool runs a parked step requested, and returns the
+   * results of any that settled at once. Task tool calls need no dispatch: the
+   * session answers them itself.
+   */
+  private async dispatchRuns(): Promise<readonly RuntimeActionResult[]> {
+    const dispatched = await this.input.cursor.advance((state) =>
+      dispatchCoordinationStep({
+        action: "park",
+        workflowToolRunOwner: {
+          inbox: sessionInboxHookToken(sessionCommandHookToken(this.input.sessionId)),
+        },
+        ...state,
+      }),
+    );
+    return dispatched.results;
   }
 
   async handleWorkflowMessage(

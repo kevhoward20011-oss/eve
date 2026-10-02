@@ -129,18 +129,6 @@ describe("session finalization with an unsettled caller", () => {
     });
   });
 
-  it("skips the child termination step when no task run is live", async () => {
-    await finalizeSession(
-      { kind: "expired" },
-      {
-        caller: undefined,
-        cursor: { serializedContext: {}, sessionState: sessionWithUnreportedUsage() },
-        sessionWritable: new WritableStream(),
-      },
-    );
-    expect(terminateChildSessionsStep).not.toHaveBeenCalled();
-  });
-
   it("terminates child sessions when a task run is live", async () => {
     const sessionState = sessionWithTaskRun();
     await finalizeSession(

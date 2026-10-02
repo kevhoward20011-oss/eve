@@ -68,6 +68,8 @@ export type DurableStepResult = (
     }
   | {
       readonly action: "park";
+      /** Set with the pending call ids: whether any of them is a workflow tool run to start. */
+      readonly hasRunsToDispatch?: boolean;
       readonly pendingCoordinationCallIds?: readonly string[];
       readonly pendingTaskToolCalls?: readonly TaskToolCall[];
       readonly settled?: SettledTurn;

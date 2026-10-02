@@ -6,6 +6,7 @@ import {
   resolveInitialTurnCallerStep,
 } from "#subagents/parent-notification.js";
 import type { DurableSessionState } from "#execution/durable-session-store.js";
+import { hasDelegatedSessionContext } from "#execution/delegated-session-context.js";
 import type { HarnessModelMessage } from "#harness/messages.js";
 import { nextTurnDelivery, type NextTurnInstruction } from "#execution/session/next-input.js";
 import { cancelDescendantTurns } from "#execution/cancel-descendant-turns.js";
@@ -121,7 +122,8 @@ export async function runPreparedSession(
       await inbox.dispose();
     }
     if (loop.kind === "transferred") {
-      // The successor arms its own timer; this one must not outlive the wait for it.
+      // The successor arms its own timer and ignores this one, so cancelling it is
+      // cleanup, done now rather than after a wait that can last the whole session.
       await sessionTimeout?.dispose();
       if (boot.anchor.kind !== "self") return { output: "" };
       result = await handoff.awaitAnchoredResult();
@@ -143,32 +145,46 @@ export async function runPreparedSession(
     }
     throw createSafeOuterWorkflowError();
   } finally {
-    // After the result is final, so cancelling the timer never delays the caller's reply.
-    // A timer that fires first reaches a disposed inbox and is ignored.
-    await Promise.all([
-      sessionTimeout?.dispose(),
-      reportResultToAnchor(boot, result, handoff, loop),
-    ]);
+    await finishOwnerRun(boot, { handoff, loop, result, sessionTimeout });
   }
 }
 
 /**
- * Terminal path for a boot that failed before the session loop could run.
- * The caller is re-resolved from context because no turn ever bound it.
+ * Cancels this owner's timer beside reporting its result. The timer is cancelled
+ * only after the result is final, so it never delays the reply; one that fires
+ * first finds the inbox disposed. Both settle before the run ends, and only the
+ * anchor report can fail it.
+ */
+async function finishOwnerRun(
+  boot: SessionBoot,
+  exit: {
+    readonly handoff: SessionHandoff;
+    readonly loop: SessionLoopOutcome | undefined;
+    readonly result: WorkflowEntryResult;
+    readonly sessionTimeout: SessionTimeoutControl | undefined;
+  },
+): Promise<void> {
+  const [, report] = await Promise.allSettled([
+    exit.sessionTimeout?.dispose(),
+    reportResultToAnchor(boot, exit.result, exit.handoff, exit.loop),
+  ]);
+  if (report.status === "rejected") throw report.reason;
+}
+
+/**
+ * Terminal path for a boot that failed before the session loop could run. No
+ * turn ever bound a caller, so one the boot did not resolve is resolved from context.
  */
 export async function failSession(input: {
+  /** The delegated caller, when the boot already resolved it. */
+  readonly caller?: TurnCaller;
   readonly error: unknown;
   readonly serializedContext: Record<string, unknown>;
   readonly sessionId: string;
   readonly sessionState: DurableSessionState | undefined;
   readonly sessionWritable: WritableStream<Uint8Array>;
 }): Promise<never> {
-  let caller: TurnCaller | undefined;
-  try {
-    caller = await resolveInitialTurnCallerStep({ serializedContext: input.serializedContext });
-  } catch {
-    // Best effort: when resolution fails again there is no reachable caller to notify.
-  }
+  const caller = input.caller ?? (await resolveFailedBootCaller(input.serializedContext));
   await finalizeSession(
     { error: input.error, kind: "failed" },
     {
@@ -181,6 +197,18 @@ export async function failSession(input: {
     },
   );
   throw createSafeOuterWorkflowError();
+}
+
+/** Only a delegated session has a caller; one that cannot be resolved cannot be notified either. */
+async function resolveFailedBootCaller(
+  serializedContext: Record<string, unknown>,
+): Promise<TurnCaller | undefined> {
+  if (!hasDelegatedSessionContext(serializedContext)) return undefined;
+  try {
+    return await resolveInitialTurnCallerStep({ serializedContext });
+  } catch {
+    return undefined;
+  }
 }
 
 async function reportResultToAnchor(
@@ -313,13 +341,12 @@ async function runSessionLoop(
     }
 
     if (action.cancelled === true) {
-      const cancelledCaller = { caller: progress.caller, sessionId: boot.sessionId };
-      const settled = await settleCancelledTurn(progress.caller !== undefined);
-      if (cancelledCaller.caller !== undefined) {
+      const { caller } = progress;
+      const settled = await settleCancelledTurn(caller !== undefined);
+      if (caller !== undefined) {
+        const notification = { caller, sessionId: boot.sessionId };
         await notifyCancelledTaskCallerStep(
-          settled.usage === undefined
-            ? cancelledCaller
-            : { ...cancelledCaller, usage: settled.usage },
+          settled.usage === undefined ? notification : { ...notification, usage: settled.usage },
         );
       }
     } else if (action.settled !== undefined) {
