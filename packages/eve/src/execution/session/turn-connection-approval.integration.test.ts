@@ -395,13 +395,21 @@ describe("turn connection approval restoration", () => {
       },
     });
     clearDurableDynamicCallbacks(sessionId);
-    const resumed = await fixture.step();
+    // Step the way the turn workflow does: a "continue" action advances the same
+    // turn with no user message, and only "park" ends it.
+    let resumed = await fixture.step();
+    while (resumed.action === "continue") {
+      clearDurableDynamicCallbacks(sessionId);
+      resumed = await fixture.step();
+    }
+    expect(resumed).toMatchObject({ action: "park", hasPendingInputBatch: false });
     expect(fixture.policyTurns).toEqual(batches.map((batch) => batch.event!.turnId));
     expect(fixture.response).toHaveBeenCalledTimes(2);
     expect(
       getApprovalAuditState(readDurableSession(resumed.sessionState).state).settlements,
     ).toHaveLength(2);
-    expect(fixture.fetch).toHaveBeenCalled();
+    expect(fixture.fetch).toHaveBeenCalledTimes(2);
+    expect(getPendingInputBatches(readDurableSession(resumed.sessionState).state)).toEqual([]);
     expect(fixture.events.filter((event) => event.type === "session.failed")).toEqual([]);
   });
   it.each([false, true])(
