@@ -174,7 +174,7 @@ describe("mcpChannel across two instances", () => {
   });
 
   it("acknowledges subscriptions/listen and then closes the stream", async () => {
-    const notifications = { toolsListChanged: true };
+    const notifications = { resourceSubscriptions: ["skill://usage-triage/SKILL.md"] };
     const response = await post(0, "subscriptions/listen", { notifications });
     // `text()` resolving at all proves the server ended the stream.
     expect(sseEvents(await response.text())).toMatchObject([
