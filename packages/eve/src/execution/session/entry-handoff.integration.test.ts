@@ -20,6 +20,8 @@ import { createWorkflowRuntime, waitForCommandHookOwner } from "#execution/workf
 import { buildSerializedContext, handoffFollowUp } from "#internal/testing/entry-test-helpers.js";
 import { captureConsoleOutput, workflowSdkNotice } from "#internal/testing/log-records.js";
 
+const handoffRefused = "[eve:execution.session.handoff] session handoff refused";
+
 describe("workflowEntry integration", () => {
   describe("deployment handoff", () => {
     it("recovers the original owner when target rejects nested state", async () => {
@@ -164,8 +166,13 @@ describe("workflowEntry integration", () => {
         expect.stringContaining(workflowSdkNotice.unpinnedDelivery),
       );
       expect(output.lines).toContainEqual(expect.stringContaining(workflowSdkNotice.maxRetries));
+      expect(output.lines).toContainEqual(expect.stringContaining(handoffRefused));
       expect(
-        output.unexpected(workflowSdkNotice.unpinnedDelivery, workflowSdkNotice.maxRetries),
+        output.unexpected(
+          workflowSdkNotice.unpinnedDelivery,
+          workflowSdkNotice.maxRetries,
+          handoffRefused,
+        ),
       ).toEqual([]);
     });
 
@@ -339,8 +346,9 @@ describe("workflowEntry integration", () => {
       expect(output.lines).toContainEqual(
         expect.stringContaining(workflowSdkNotice.unpinnedDelivery),
       );
+      expect(output.lines).toContainEqual(expect.stringContaining(handoffRefused));
       // No validation retry: the SDK never reports an exhausted step.
-      expect(output.unexpected(workflowSdkNotice.unpinnedDelivery)).toEqual([]);
+      expect(output.unexpected(workflowSdkNotice.unpinnedDelivery, handoffRefused)).toEqual([]);
     });
 
     it("retains a message accepted just before durable hook disposal", async () => {

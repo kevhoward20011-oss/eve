@@ -12,6 +12,8 @@ import type { WorkflowEntryResult } from "#execution/session/entry-input.js";
 import { startSessionOwnerStep } from "#execution/workflow-runtime.js";
 import { sessionHandoffMarkerToken } from "#execution/session-inbox/address.js";
 import { isSessionIdleForHandoffStep } from "#execution/session/handoff-steps.js";
+import { reportRetainedHandoffStep } from "#execution/session/report-retained-handoff-step.js";
+import { normalizeSerializableError } from "#execution/workflow-errors.js";
 import type { AgentWorkflowRetentionDefinition } from "#shared/agent-definition.js";
 
 /**
@@ -143,6 +145,7 @@ export class SessionHandoff {
         return { kind: "retained", reason: "accepted-during-release" };
       }
       let acceptedByFailedCandidate: readonly SessionInboxPayload[] = [];
+      let activationError: unknown;
       try {
         const activation = await this.startAndActivate(
           checkpoint,
@@ -153,13 +156,17 @@ export class SessionHandoff {
         if (activation.kind === "incompatible") {
           this.incompatibleTargetDeploymentIds.add(targetDeploymentId);
           await this.recover(tokens, activation.payloads);
+          await this.reportRetained("checkpoint-incompatible", targetDeploymentId);
           return { kind: "retained", reason: "checkpoint-incompatible" };
         }
         acceptedByFailedCandidate = activation.payloads;
-      } catch {
+        activationError = activation.error;
+      } catch (error) {
         // The current owner remains authoritative until activation.
+        activationError = normalizeSerializableError(error);
       }
       await this.recover(tokens, acceptedByFailedCandidate);
+      await this.reportRetained("activation-failed", targetDeploymentId, activationError);
       return { kind: "retained", reason: "activation-failed" };
     } finally {
       await Promise.all(markers.map((marker) => disposeHook(marker)));
@@ -214,6 +221,21 @@ export class SessionHandoff {
   ): Promise<void> {
     await this.input.inbox.claimSessionHooks(tokens);
     this.input.inbox.restore(payloads);
+  }
+
+  private async reportRetained(
+    reason: "activation-failed" | "checkpoint-incompatible",
+    targetDeploymentId: string,
+    error?: unknown,
+  ): Promise<void> {
+    await reportRetainedHandoffStep({
+      checkpointVersion: SESSION_CHECKPOINT_VERSION,
+      error,
+      ownerDeploymentId: this.input.deploymentId,
+      reason,
+      sessionId: this.input.sessionId,
+      targetDeploymentId,
+    });
   }
 
   private async ensureAnchor(): Promise<void> {

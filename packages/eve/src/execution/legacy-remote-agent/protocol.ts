@@ -95,6 +95,20 @@ export async function forwardLegacySessionInput(
   return true;
 }
 
+/**
+ * Renames a protocol-1 `task.*` callback to the session callback kind it
+ * carries, as 0.66–0.68 callers did. Production callbacks reach the caller's
+ * newest deployment even while a 0.66–0.68 deployment still owns the session.
+ * The callback route validates the result, which drops `taskId` and, for
+ * authorization events, `childContinuationToken`.
+ */
+export function renameLegacyTaskCallback(body: unknown): unknown {
+  if (!isObject(body)) return body;
+  if (body.kind === "task.input-requested") return { ...body, kind: "subagent-input-request" };
+  if (body.kind === "task.authorization") return { ...body, kind: "subagent-authorization-event" };
+  return body;
+}
+
 /** Route a protocol-1 caller posts its answers to a remote agent's question or approval. */
 export const legacyTaskInputRoute = {
   handler: handleLegacyTaskInputRequest,

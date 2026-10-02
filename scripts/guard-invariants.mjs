@@ -489,6 +489,7 @@ const LEGACY_REMOTE_AGENT_INGRESS_FILES = new Set([
   "packages/eve/src/eve-channel/index.ts",
   "packages/eve/src/eve-channel/request.ts",
   "packages/eve/src/execution/forward-session-input.ts",
+  "packages/eve/src/subagents/callback-route.ts",
 ]);
 // `from "…"` covers imports and re-exports; `import "…"` and `import("…")` cover side effects and dynamic imports.
 const LEGACY_REMOTE_AGENT_IMPORT_RE = /\b(?:from|import)\s*\(?\s*["'][^"']*legacy-remote-agent\//;

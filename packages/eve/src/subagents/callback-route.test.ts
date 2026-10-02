@@ -128,6 +128,42 @@ describe("session callback route", () => {
     });
   });
 
+  it("relays a protocol-1 task question to the current session hook", async () => {
+    resumeHookMock.mockResolvedValue(undefined);
+    const question = {
+      callId: "call-2",
+      childContinuationToken: "child-inbox",
+      childSessionId: "remote-session",
+      event: {
+        requests: [
+          {
+            action: { callId: "ask-1", input: {}, kind: "tool-call", toolName: "ask_question" },
+            kind: "question",
+            prompt: "What should Alice do?",
+            requestId: "alice-1",
+          },
+        ],
+        sequence: 0,
+        stepIndex: 1,
+        turnId: "child-turn",
+      },
+      subagentName: "research",
+    };
+    const response = await handleSessionCallbackRequest(
+      new Request("https://app.example.com/eve/v1/callback/tok123", {
+        body: JSON.stringify({ ...question, kind: "task.input-requested", taskId: "task-1" }),
+        method: "POST",
+      }),
+      createRouteContext({ token: "tok123" }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(resumeHookMock).toHaveBeenCalledWith("tok123", {
+      ...question,
+      kind: "subagent-input-request",
+    });
+  });
+
   it("relays remote authorization lifecycle without settling the turn", async () => {
     resumeHookMock.mockResolvedValue(undefined);
     const event = {
