@@ -2,13 +2,7 @@ import type { Nitro } from "nitro/types";
 import { describe, expect, it } from "vitest";
 
 import { createScheduleRegistrations } from "#runtime/schedules/register.js";
-import {
-  registerScheduleTaskHandlers,
-  registerToolSessionSandboxSweepTask,
-  shouldScheduleToolSessionSandboxSweep,
-  TOOL_SESSION_SANDBOX_SWEEP_CRON,
-  TOOL_SESSION_SANDBOX_SWEEP_TASK_NAME,
-} from "#internal/nitro/host/schedule-task-routes.js";
+import { registerScheduleTaskHandlers } from "#internal/nitro/host/schedule-task-routes.js";
 
 const DISPATCH_MODULE_PATH = "/framework/schedule-task.ts";
 
@@ -95,45 +89,6 @@ describe("schedule task routes", () => {
     expect(nitro.options.tasks).toEqual({});
     expect(nitro.options.scheduledTasks).toEqual({});
     expect(nitro.options.virtual).toEqual({});
-  });
-});
-
-describe("tool-session sandbox sweep task", () => {
-  it("schedules the sweep weekly as a framework task", () => {
-    const nitro = createNitroStub();
-
-    registerToolSessionSandboxSweepTask(nitro, {
-      artifactsConfig: ARTIFACTS_CONFIG,
-      sweepModulePath: "/framework/tool-session-sandbox-sweep-task.ts",
-    });
-
-    expect(TOOL_SESSION_SANDBOX_SWEEP_CRON).toMatch(/^\d+ \d+ \* \* 0$/);
-    expect(nitro.options.experimental.tasks).toBe(true);
-    expect(nitro.options.scheduledTasks).toEqual({
-      [TOOL_SESSION_SANDBOX_SWEEP_CRON]: TOOL_SESSION_SANDBOX_SWEEP_TASK_NAME,
-    });
-    const source =
-      nitro.options.virtual[`#eve-schedule-task/${TOOL_SESSION_SANDBOX_SWEEP_TASK_NAME}`];
-    expect(source).toContain(
-      'import { runToolSessionSandboxSweepTask } from "/framework/tool-session-sandbox-sweep-task.ts";',
-    );
-    expect(source).toContain("runToolSessionSandboxSweepTask(config)");
-    expect(source).not.toContain("nitro/task");
-  });
-
-  it("schedules it only for providers that keep tool-session sandboxes", () => {
-    expect(
-      shouldScheduleToolSessionSandboxSweep({ preset: "vercel", providerName: "vercel" }),
-    ).toBe(true);
-    expect(
-      shouldScheduleToolSessionSandboxSweep({ preset: undefined, providerName: "just-bash" }),
-    ).toBe(true);
-    expect(
-      shouldScheduleToolSessionSandboxSweep({ preset: "vercel", providerName: "just-bash" }),
-    ).toBe(false);
-    expect(
-      shouldScheduleToolSessionSandboxSweep({ preset: undefined, providerName: "docker" }),
-    ).toBe(false);
   });
 });
 
