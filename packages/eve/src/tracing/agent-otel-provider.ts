@@ -7,33 +7,23 @@ import {
   trace,
 } from "#compiled/@opentelemetry/api/index.js";
 
-import { contextStorage } from "#context/container.js";
-import { SessionTraceSeedKey } from "#context/keys.js";
-import { withoutInstrumentationContent } from "#instrumentation/content.js";
-import { instrumentationEventForTraceDecision } from "#instrumentation/content-policy.js";
-import type { AgentTraceStateStore, AgentTurnTraceState } from "#tracing/agent-trace-state.js";
+import type { AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { createAgentActionInstrumentation } from "#tracing/agent-action-instrumentation.js";
 import { createAgentApprovalInstrumentation } from "#tracing/agent-approval-instrumentation.js";
 import { createAgentChannelDeliveryInstrumentation } from "#tracing/agent-channel-delivery-instrumentation.js";
 import { createAgentToolInstrumentation } from "#tracing/agent-tool-instrumentation.js";
 import { markAgentTraceContext } from "#tracing/agent-trace-context.js";
-import * as runtimeAttributes from "#tracing/agent-otel-runtime-context.js";
+import { eveActivationMetadata } from "#tracing/adapters/eve/metadata.js";
 import { createAgentMemoryInstrumentation } from "#tracing/agent-memory-instrumentation.js";
-import { readGatewayCostData } from "#tracing/agent-otel-usage.js";
-import { createAgentOtelSessionContext } from "#tracing/agent-otel-session-context.js";
+import { readGatewayCostData } from "#tracing/adapters/gateway.js";
+import { createEveSessionTracing } from "#tracing/adapters/eve/session.js";
 import type { TraceCapturePolicy } from "#tracing/otel-declaration.js";
-import { isSampledTrace, resolveTracePolicyDecision } from "#tracing/sampled-trace.js";
-import {
-  applyLiveDeliveryAudienceCeiling,
-  resolveForwardedTraceSeed,
-} from "#shared/forwarded-trace-policy.js";
-import { readInstrumentationDecision } from "#shared/instrumentation-decision.js";
+import { isSampledTrace } from "#tracing/sampled-trace.js";
+import { createEveCapturePolicy } from "#tracing/adapters/eve/policy.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import { suppressTracing } from "#tracing/suppress-tracing.js";
-import { normalizeChannelAudience, type ChannelAudience } from "#shared/channel-audience.js";
 import type {
-  InstrumentationEvent,
   InstrumentationStepAttemptMetadataEvent,
   InstrumentationAttemptScope,
   InstrumentationStepAttemptStartedEvent,
@@ -46,7 +36,6 @@ import type {
   InstrumentationTraceSeed,
   InstrumentationSessionTransitionEvent,
   InstrumentationTurnStartedEvent,
-  InstrumentationTurnTerminalEvent,
 } from "#instrumentation/lifecycle.js";
 import { attemptIdempotencyKey } from "#instrumentation/lifecycle.js";
 import { type AgentSamplingOperation } from "#tracing/agent-span-contract.js";
@@ -54,7 +43,6 @@ import { withErrorContent } from "#tracing/error-content-context.js";
 import { withAgentToolContentPolicy } from "#tracing/agent-tool-span-context.js";
 import { resolveInstrumentationEnvironment } from "#internal/application/dev-environment.js";
 import type { ConversationEnvironment } from "#shared/conversation-context.js";
-import type { TraceLink } from "#tracing/core/types.js";
 import { createEveTraceLifecycle } from "#tracing/adapters/eve/scopes.js";
 import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
 import type { RuntimeScope } from "#tracing/core/scopes.js";
@@ -133,63 +121,19 @@ export function createAgentOtelInstrumentation(
     },
   });
   const memory = createAgentMemoryInstrumentation({ ...input, environment, lifecycle });
-  const { prepareSessionTrace, prepareTurnTrace } = createAgentOtelSessionContext({
+  const sessionTracing = createEveSessionTracing({
     ...input,
     environment,
     lifecycle,
   });
+  const { prepareSessionTrace, prepareTurnTrace } = sessionTracing;
 
-  const projectEvent = async (event: InstrumentationEvent): Promise<InstrumentationEvent> => {
-    const session = await input.stateStore.getSession(sessionIdForEvent(event));
-    const audience = audienceForEvent(event, session?.channelAudience);
-    const eventSeed = "traceSeed" in event ? event.traceSeed : undefined;
-    const contextSeed = contextStorage.getStore()?.get(SessionTraceSeedKey);
-    const contextTraceState = resolveForwardedTraceSeed(contextSeed);
-    const eventTraceState = resolveForwardedTraceSeed(
-      eventSeed,
-      contextTraceState?.forwardedTracePolicy,
-    );
-    const decisionForTrace = (trace: { readonly traceFlags: number } | undefined) =>
-      trace === undefined
-        ? undefined
-        : resolveTracePolicyDecision(isSampledTrace(trace), { audience, environment });
-    const decision =
-      eventTraceState?.decision ??
-      contextTraceState?.decision ??
-      readInstrumentationDecision(session?.decision) ??
-      decisionForTrace(eventSeed) ??
-      decisionForTrace(contextSeed) ??
-      decisionForTrace(session?.context);
-    if (decision === undefined) return withoutInstrumentationContent(event);
-    const normalizedEvent =
-      eventTraceState === undefined || !("traceSeed" in event) || event.traceSeed === undefined
-        ? event
-        : {
-            ...event,
-            traceSeed: {
-              ...event.traceSeed,
-              decision: eventTraceState.decision,
-              traceFlags: eventTraceState.traceFlags,
-            },
-          };
-    return instrumentationEventForTraceDecision(
-      normalizedEvent,
-      applyLiveDeliveryAudienceCeiling(
-        decision.action === "drop"
-          ? decision
-          : {
-              action: "record",
-              recordInputs: recordInputs && decision.recordInputs,
-              recordOutputs: recordOutputs && decision.recordOutputs,
-            },
-        audience,
-        eventTraceState?.forwardedTracePolicy ?? contextTraceState?.forwardedTracePolicy,
-        environment,
-      ),
-      { audience, environment },
-      { applyAudienceCeiling: false },
-    );
-  };
+  const capturePolicy = createEveCapturePolicy({
+    stateStore: input.stateStore,
+    environment,
+    recordInputs,
+    recordOutputs,
+  });
 
   const onSessionStarted = async (event: InstrumentationSessionStartedEvent): Promise<void> => {
     await prepareSessionTrace(event);
@@ -230,7 +174,7 @@ export function createAgentOtelInstrumentation(
             index: event.scope.stepIndex,
             attempt: event.scope.attemptIndex,
             runtimeContext: event.runtimeContext,
-            channel: runtimeAttributes.agentActivationMetadata({
+            channel: eveActivationMetadata({
               session,
               turn,
               sessionId: event.scope.sessionId,
@@ -266,79 +210,10 @@ export function createAgentOtelInstrumentation(
     steps.delete(scope);
   };
 
-  const onTurnTerminal = async (event: InstrumentationTurnTerminalEvent): Promise<void> => {
-    await input.stateStore.updateTurn(event.sessionId, event.turnId, (turn) => ({
-      ...turn,
-      terminal:
-        event.type === "turn.failed"
-          ? { error: event.error, type: event.type }
-          : { type: event.type },
-    }));
-  };
-
   const onSessionTransition = async (
     event: InstrumentationSessionTransitionEvent,
   ): Promise<void> => {
-    if (event.type === "session.failed" && event.turnId !== undefined) {
-      await input.stateStore.updateTurn(event.sessionId, event.turnId, (turn) => ({
-        ...turn,
-        terminal: turn.terminal ?? { error: event.error, type: "turn.failed" },
-      }));
-    }
-    if (event.turnId !== undefined) {
-      const turn = await input.stateStore.getTurn(event.sessionId, event.turnId);
-      if (turn !== undefined) {
-        const session = await input.stateStore.getSession(event.sessionId);
-        if (isSampledTrace(turn.context)) {
-          const agentName = session?.agentName ?? turn.subagentName;
-          const parentContext = withChannelAudience(ROOT_CONTEXT, session?.channelAudience);
-          const runtime = await lifecycle.resolve(
-            eveScopeRecord(
-              {
-                ...turn,
-                sessionId: event.sessionId,
-                turnId: event.turnId,
-                agentName,
-                frameworkVersion: input.frameworkVersion,
-                reference: turn.context,
-                startTimeMs: turn.startTimeMs,
-                links: agentActivationLinks(turn),
-                content: {
-                  recordInputs:
-                    session?.decision?.action === "record" && session.decision.recordInputs,
-                  recordOutputs:
-                    session?.decision?.action === "record" && session.decision.recordOutputs,
-                },
-              },
-              `${event.sessionId}:${event.turnId}`,
-              {
-                type: "activation",
-                options: runtimeAttributes.agentActivationMetadata({
-                  session,
-                  turn,
-                  sessionId: event.sessionId,
-                }),
-              },
-            ),
-            { deferred: true, executionContext: parentContext },
-          );
-          await runtime.finish({
-            usage: turn.modelUsage,
-            outcome:
-              turn.terminal === undefined
-                ? undefined
-                : turn.terminal.type === "turn.completed"
-                  ? "completed"
-                  : turn.terminal.type === "turn.cancelled"
-                    ? "cancelled"
-                    : "failed",
-            failed: turn.terminal?.type === "turn.failed",
-            error: turn.terminal?.type === "turn.failed" ? turn.terminal.error : undefined,
-          });
-        }
-        await input.stateStore.deleteTurn(event.sessionId, event.turnId);
-      }
-    }
+    await sessionTracing.sessionTransition(event);
     // `session.waiting` is not terminal — the session may resume with a new
     // turn that still needs its metadata — so only release session-scoped
     // state on terminal transitions.
@@ -379,38 +254,13 @@ export function createAgentOtelInstrumentation(
     if (event.type === "model.call.failed") {
       await state.runtime.finish({ failed: true, error: event.error });
     } else {
-      await recordTurnUsage(event);
+      await sessionTracing.recordModelUsage(event.scope.sessionId, event.scope.turnId, event.usage);
       await state.runtime.finish({
         model: { ...event, content: recordOutputs ? event.content : undefined },
       });
       const attempt = steps.get(event.scope);
       if (attempt !== undefined) await attempt.runtime.usage(event.usage);
     }
-  };
-
-  const recordTurnUsage = async (
-    event: Extract<
-      InstrumentationModelCallTerminalEvent,
-      { readonly type: "model.call.completed" }
-    >,
-  ): Promise<void> => {
-    if (event.usage.inputTokens === undefined && event.usage.outputTokens === undefined) return;
-    // The bridge publishes at most one completion per physical execution.
-    // Workflow retries restart from pre-step state, so abandoned additions are
-    // not merged; distinct completed retries consumed tokens and count here.
-    await input.stateStore.updateTurn(event.scope.sessionId, event.scope.turnId, (turn) => ({
-      ...turn,
-      modelUsage: {
-        inputTokens:
-          event.usage.inputTokens === undefined
-            ? turn.modelUsage?.inputTokens
-            : (turn.modelUsage?.inputTokens ?? 0) + event.usage.inputTokens,
-        outputTokens:
-          event.usage.outputTokens === undefined
-            ? turn.modelUsage?.outputTokens
-            : (turn.modelUsage?.outputTokens ?? 0) + event.usage.outputTokens,
-      },
-    }));
   };
 
   const channelDeliveries = createAgentChannelDeliveryInstrumentation({
@@ -451,13 +301,13 @@ export function createAgentOtelInstrumentation(
         "session.started": onSessionStarted,
         "session.waiting": onSessionTransition,
         ...tools.events,
-        "turn.cancelled": onTurnTerminal,
-        "turn.completed": onTurnTerminal,
-        "turn.failed": onTurnTerminal,
+        "turn.cancelled": sessionTracing.turnTerminal,
+        "turn.completed": sessionTracing.turnTerminal,
+        "turn.failed": sessionTracing.turnTerminal,
         "turn.started": onTurnStarted,
       },
       name: "eve.otel",
-      projectEvent,
+      projectEvent: capturePolicy.projectEvent,
       tracePolicy: () => ({ emit: true, recordInputs, recordOutputs }),
     },
     prepareSessionTrace,
@@ -483,22 +333,7 @@ export function createAgentOtelInstrumentation(
           if (!isSampledTrace(turn.context)) parent = suppressTracing(parent);
         }
       }
-      const session = await input.stateStore.getSession(operation.scope.sessionId);
-      const seed = resolveForwardedTraceSeed(contextStorage.getStore()?.get(SessionTraceSeedKey));
-      const decision = seed?.decision ?? session?.decision;
-      const effective =
-        decision === undefined
-          ? undefined
-          : applyLiveDeliveryAudienceCeiling(
-              decision,
-              normalizeChannelAudience(operation.scope.channelAudience),
-              seed?.forwardedTracePolicy,
-              environment,
-            );
-      const toolContentPolicy = {
-        recordInputs: recordInputs && effective?.action === "record" && effective.recordInputs,
-        recordOutputs: recordOutputs && effective?.action === "record" && effective.recordOutputs,
-      };
+      const toolContentPolicy = await capturePolicy.forOperation(operation.scope);
       if (parent === undefined) return execute();
       const withErrorPolicy = withErrorContent(parent, toolContentPolicy.recordOutputs);
       const operationContext =
@@ -527,41 +362,6 @@ export function createAgentOtelInstrumentation(
     }
     modelSpans.delete(event.scope);
   }
-}
-
-function agentActivationLinks(turn: AgentTurnTraceState): TraceLink[] | undefined {
-  const links: TraceLink[] = [];
-  if (turn.caller !== undefined) {
-    links.push({
-      context: turn.caller,
-      relationship: "agent.dispatch",
-    });
-  }
-  if (turn.channelDelivery?.requestTraceContext !== undefined) {
-    links.push({
-      context: turn.channelDelivery.requestTraceContext,
-      relationship: "channel.request",
-    });
-  }
-  return links.length === 0 ? undefined : links;
-}
-
-function sessionIdForEvent(event: InstrumentationEvent): string {
-  return "scope" in event ? event.scope.sessionId : event.sessionId;
-}
-
-function audienceForEvent(
-  event: InstrumentationEvent,
-  sessionAudience: ChannelAudience | undefined,
-): ChannelAudience {
-  if ("delivery" in event) return normalizeChannelAudience(event.delivery.channelAudience);
-  if ("scope" in event && event.scope.channelAudience !== undefined) {
-    return normalizeChannelAudience(event.scope.channelAudience);
-  }
-  if (event.type === "session.started") {
-    return normalizeChannelAudience(event.channelAudience);
-  }
-  return normalizeChannelAudience(sessionAudience);
 }
 
 function getSpanStates<T>(

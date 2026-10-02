@@ -47,7 +47,7 @@ import { channelAudienceFromContext } from "#tracing/channel-audience-context.js
 import { agentToolContentPolicy, agentToolSpanContext } from "#tracing/agent-tool-span-context.js";
 import { contentFilteringProcessor } from "#tracing/content-span-processor.js";
 import { parseLocalTraceSegment } from "#tracing/local-trace-reader.js";
-import { CONTENT_ATTRIBUTE_LIMIT } from "#tracing/agent-otel-content.js";
+import { CONTENT_ATTRIBUTE_LIMIT } from "#tracing/adapters/serialization.js";
 import type { TraceCapturePolicy } from "#tracing/otel-declaration.js";
 import type { TraceCaptureContext } from "#shared/trace-policy.js";
 import {

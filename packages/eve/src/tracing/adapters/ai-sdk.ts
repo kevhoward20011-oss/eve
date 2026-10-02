@@ -1,6 +1,7 @@
 import type { Telemetry, TelemetryOptions } from "ai";
 import { scopeRuntime, type RuntimeScope, type TurnScope } from "#tracing/core/scopes.js";
 import type { ContentPart } from "#tracing/core/types.js";
+import { readGatewayCostData } from "#tracing/adapters/gateway.js";
 
 type Event<K extends keyof Telemetry> = Parameters<NonNullable<Telemetry[K]>>[0];
 
@@ -113,22 +114,8 @@ export function aiSdkTracing(
       await active.action.finish(terminal);
     },
     async onStepEnd(event) {
-      const gateway = event.providerMetadata?.gateway;
-      if (gateway !== undefined && typeof gateway === "object" && gateway !== null) {
-        const data = gateway as Record<string, unknown>;
-        const number = (value: unknown) => {
-          if (typeof value !== "string" || value.trim() === "") return undefined;
-          const parsed = Number(value);
-          return Number.isFinite(parsed) ? parsed : undefined;
-        };
-        step?.cost({
-          cost: number(data.cost),
-          gatewayCost: number(data.gatewayCost),
-          inputCost: number(data.inputInferenceCost),
-          outputCost: number(data.outputInferenceCost),
-          generationId: typeof data.generationId === "string" ? data.generationId : undefined,
-        });
-      }
+      const cost = readGatewayCostData(event.providerMetadata);
+      if (cost !== undefined) step?.cost(cost);
       await drain();
     },
     async onAbort() {

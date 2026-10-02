@@ -1,5 +1,8 @@
 /** Converts provider metadata to semantic cost data for the lifecycle DSL. */
-export function readGatewayCostData(providerMetadata: Readonly<Record<string, unknown>>) {
+export function readGatewayCostData(
+  providerMetadata: Readonly<Record<string, unknown>> | undefined,
+) {
+  if (providerMetadata === undefined) return undefined;
   const gateway = providerMetadata.gateway;
   if (typeof gateway !== "object" || gateway === null || Array.isArray(gateway)) return undefined;
   const data = gateway as Record<string, unknown>;

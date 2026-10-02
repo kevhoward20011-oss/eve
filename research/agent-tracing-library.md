@@ -543,7 +543,7 @@ delegation e2e coverage. Run e2e in CI.
 ## Source contract
 
 - [Activation, step, and model](../packages/eve/src/tracing/agent-otel-provider.ts).
-- [Activation metadata](../packages/eve/src/tracing/agent-otel-runtime-context.ts).
+- [Activation metadata](../packages/eve/src/tracing/adapters/eve/metadata.ts).
 - [Action](../packages/eve/src/tracing/agent-action-instrumentation.ts).
 - [Tool execution](../packages/eve/src/tracing/agent-tool-instrumentation.ts).
 - [Approval](../packages/eve/src/tracing/agent-approval-instrumentation.ts).

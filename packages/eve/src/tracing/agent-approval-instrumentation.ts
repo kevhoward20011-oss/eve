@@ -7,8 +7,8 @@ import type {
   InstrumentationProviderDefinition,
 } from "#instrumentation/lifecycle.js";
 import type { JsonValue } from "#shared/json.js";
-import { contentAttribute } from "#tracing/agent-otel-content.js";
-import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
+import { contentAttribute } from "#tracing/adapters/serialization.js";
+import { traceSessionIdOf } from "#tracing/adapters/eve/checkpointer.js";
 import { decodeTraceSessionId } from "#tracing/agent-trace-context-codec.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";

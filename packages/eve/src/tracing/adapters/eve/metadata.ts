@@ -4,7 +4,7 @@ import type { TurnMetadata } from "#tracing/core/scopes.js";
 import { checkpointContent } from "#tracing/adapters/eve/checkpointer.js";
 
 /** Converts eve-owned session metadata to the lifecycle DSL's semantic input. */
-export function agentActivationMetadata(input: {
+export function eveActivationMetadata(input: {
   readonly session?: AgentSessionTraceState;
   readonly turn: AgentTurnTraceState;
   readonly sessionId: string;

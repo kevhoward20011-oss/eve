@@ -1,5 +1,3 @@
-import { isUserMessageKind } from "#harness/messages.js";
-
 /**
  * Serializes model and tool payloads into span content attributes for the
  * local trace viewer: prompt messages, the system prompt, responses, and
@@ -25,7 +23,10 @@ export function contentAttribute(value: unknown): string | undefined {
 }
 
 /** Serializes model messages using the OpenTelemetry GenAI message schema. */
-export function genAiInputMessagesAttribute(messages: unknown): string | undefined {
+export function genAiInputMessagesAttribute(
+  messages: unknown,
+  messageKind?: (value: unknown) => string | undefined,
+): string | undefined {
   if (!Array.isArray(messages)) return undefined;
   const formatted = messages.flatMap((message) => {
     if (!isRecord(message) || message.role === "system" || typeof message.role !== "string") {
@@ -33,8 +34,7 @@ export function genAiInputMessagesAttribute(messages: unknown): string | undefin
     }
     const parts = semanticParts(message.content);
     if (parts.length === 0) return [];
-    const kind =
-      message.role === "user" && isUserMessageKind(message.kind) ? message.kind : undefined;
+    const kind = message.role === "user" ? messageKind?.(message.kind) : undefined;
     return [
       kind === undefined ? { parts, role: message.role } : { kind, parts, role: message.role },
     ];

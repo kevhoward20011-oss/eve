@@ -12,8 +12,8 @@ import type {
   InstrumentationProviderDefinition,
 } from "#instrumentation/lifecycle.js";
 import { actionIdempotencyKey, attemptIdempotencyKey } from "#instrumentation/lifecycle.js";
-import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
-import { contentAttribute, textContentAttribute } from "#tracing/agent-otel-content.js";
+import { traceSessionIdOf } from "#tracing/adapters/eve/checkpointer.js";
+import { contentAttribute, textContentAttribute } from "#tracing/adapters/serialization.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import type { AgentActionTraceState, AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import { normalizeChannelAudience } from "#shared/channel-audience.js";

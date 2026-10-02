@@ -5,6 +5,9 @@ import {
   type InstrumentationTraceContext,
   type InstrumentationTraceSeed,
   type InstrumentationTurnStartedEvent,
+  type InstrumentationTurnTerminalEvent,
+  type InstrumentationSessionTransitionEvent,
+  type InstrumentationUsage,
 } from "#instrumentation/lifecycle.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { normalizeChannelAudience } from "#shared/channel-audience.js";
@@ -17,30 +20,30 @@ import {
 } from "#tracing/sampled-trace.js";
 import type { AgentSessionTraceState, AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import { readInstrumentationDecision } from "#shared/instrumentation-decision.js";
-import { type AgentSamplingOperation } from "#tracing/agent-span-contract.js";
-import { agentActivationMetadata } from "#tracing/agent-otel-runtime-context.js";
+import { eveActivationMetadata } from "#tracing/adapters/eve/metadata.js";
 import { eveScopeRecord } from "#tracing/adapters/eve/checkpointer.js";
 import type { AgentTurnTraceState } from "#tracing/agent-trace-state.js";
 import { applyPrincipalTraceDecision } from "#instrumentation/principal-summary.js";
 import { normalizeInstrumentationChannelKind } from "#internal/instrumentation.js";
 import type { ConversationEnvironment } from "#shared/conversation-context.js";
-import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
+import { traceSessionIdOf } from "#tracing/adapters/eve/checkpointer.js";
+import { ROOT_CONTEXT } from "#compiled/@opentelemetry/api/index.js";
+import { withChannelAudience } from "#tracing/channel-audience-context.js";
+import type { TraceLink } from "#tracing/core/types.js";
+import type { AgentTracing } from "#tracing/core/agent-tracing.js";
 
-interface AgentOtelSessionContextInput {
-  readonly lifecycle: ReturnType<
-    typeof import("#tracing/core/agent-tracing.js").createAgentTracing
-  >["lifecycle"];
+interface EveSessionTracingInput {
+  readonly lifecycle: AgentTracing["lifecycle"];
   readonly environment: ConversationEnvironment;
   readonly frameworkVersion: string;
   readonly idGenerator: AgentSpanIdGenerator;
-  readonly samplesTrace?: (traceId: string, operation?: AgentSamplingOperation) => boolean;
   readonly stateStore: AgentTraceStateStore;
   readonly tracePolicy?: TraceCapturePolicy;
 }
 
 type SessionMetadata = Omit<InstrumentationSessionStartedEvent, "idempotencyKey" | "type">;
 
-interface AgentOtelSessionContext {
+interface EveSessionTracing {
   readonly ensureSessionContext: (event: SessionMetadata) => Promise<AgentSessionTraceState>;
   readonly prepareSessionTrace: (
     event: InstrumentationSessionStartedEvent,
@@ -48,11 +51,12 @@ interface AgentOtelSessionContext {
   readonly prepareTurnTrace: (
     event: InstrumentationTurnStartedEvent,
   ) => Promise<InstrumentationTraceSeed>;
+  turnTerminal(event: InstrumentationTurnTerminalEvent): Promise<void>;
+  sessionTransition(event: InstrumentationSessionTransitionEvent): Promise<void>;
+  recordModelUsage(sessionId: string, turnId: string, usage: InstrumentationUsage): Promise<void>;
 }
 
-export function createAgentOtelSessionContext(
-  input: AgentOtelSessionContextInput,
-): AgentOtelSessionContext {
+export function createEveSessionTracing(input: EveSessionTracingInput): EveSessionTracing {
   const ensureSessionContext = async (event: SessionMetadata): Promise<AgentSessionTraceState> => {
     let state = await input.stateStore.getSession(event.sessionId);
     if (state === undefined) {
@@ -130,7 +134,7 @@ export function createAgentOtelSessionContext(
           event.idempotencyKey,
           {
             type: "activation",
-            options: agentActivationMetadata({ session, turn, sessionId: event.sessionId }),
+            options: eveActivationMetadata({ session, turn, sessionId: event.sessionId }),
           },
         ),
       );
@@ -143,7 +147,104 @@ export function createAgentOtelSessionContext(
     return portableSpanContext(turnContext, session.decision);
   };
 
-  return { ensureSessionContext, prepareSessionTrace, prepareTurnTrace };
+  return {
+    ensureSessionContext,
+    prepareSessionTrace,
+    prepareTurnTrace,
+    async turnTerminal(event) {
+      await input.stateStore.updateTurn(event.sessionId, event.turnId, (turn) => ({
+        ...turn,
+        terminal:
+          event.type === "turn.failed"
+            ? { error: event.error, type: event.type }
+            : { type: event.type },
+      }));
+    },
+    async sessionTransition(event) {
+      if (event.type === "session.failed" && event.turnId !== undefined)
+        await input.stateStore.updateTurn(event.sessionId, event.turnId, (turn) => ({
+          ...turn,
+          terminal: turn.terminal ?? { error: event.error, type: "turn.failed" },
+        }));
+      if (event.turnId === undefined) return;
+      const turn = await input.stateStore.getTurn(event.sessionId, event.turnId);
+      if (turn === undefined) return;
+      const session = await input.stateStore.getSession(event.sessionId);
+      if (isSampledTrace(turn.context)) {
+        const runtime = await input.lifecycle.resolve(
+          eveScopeRecord(
+            {
+              ...turn,
+              sessionId: event.sessionId,
+              turnId: event.turnId,
+              agentName: session?.agentName ?? turn.subagentName,
+              frameworkVersion: input.frameworkVersion,
+              reference: turn.context,
+              links: activationLinks(turn),
+              content: {
+                recordInputs:
+                  session?.decision?.action === "record" && session.decision.recordInputs,
+                recordOutputs:
+                  session?.decision?.action === "record" && session.decision.recordOutputs,
+              },
+            },
+            `${event.sessionId}:${event.turnId}`,
+            {
+              type: "activation",
+              options: eveActivationMetadata({ session, turn, sessionId: event.sessionId }),
+            },
+          ),
+          {
+            deferred: true,
+            executionContext: withChannelAudience(ROOT_CONTEXT, session?.channelAudience),
+          },
+        );
+        await runtime.finish({
+          usage: turn.modelUsage,
+          outcome:
+            turn.terminal === undefined
+              ? undefined
+              : turn.terminal.type === "turn.completed"
+                ? "completed"
+                : turn.terminal.type === "turn.cancelled"
+                  ? "cancelled"
+                  : "failed",
+          failed: turn.terminal?.type === "turn.failed",
+          error: turn.terminal?.type === "turn.failed" ? turn.terminal.error : undefined,
+        });
+      }
+      await input.stateStore.deleteTurn(event.sessionId, event.turnId);
+    },
+    async recordModelUsage(sessionId, turnId, usage) {
+      if (usage.inputTokens === undefined && usage.outputTokens === undefined) return;
+      // Workflow replay restarts from pre-step state; distinct completed retries count.
+      await input.stateStore.updateTurn(sessionId, turnId, (turn) => ({
+        ...turn,
+        modelUsage: {
+          inputTokens:
+            usage.inputTokens === undefined
+              ? turn.modelUsage?.inputTokens
+              : (turn.modelUsage?.inputTokens ?? 0) + usage.inputTokens,
+          outputTokens:
+            usage.outputTokens === undefined
+              ? turn.modelUsage?.outputTokens
+              : (turn.modelUsage?.outputTokens ?? 0) + usage.outputTokens,
+        },
+      }));
+    },
+  };
+}
+
+function activationLinks(turn: AgentTurnTraceState): TraceLink[] | undefined {
+  const links: TraceLink[] = [];
+  if (turn.caller !== undefined)
+    links.push({ context: turn.caller, relationship: "agent.dispatch" });
+  if (turn.channelDelivery?.requestTraceContext !== undefined)
+    links.push({
+      context: turn.channelDelivery.requestTraceContext,
+      relationship: "channel.request",
+    });
+  return links.length === 0 ? undefined : links;
 }
 
 function portableSpanContext(
@@ -168,7 +269,7 @@ function adoptedSpanContext(handed: InstrumentationTraceContext): SpanContext {
 }
 
 function initialSessionContext(
-  input: AgentOtelSessionContextInput,
+  input: EveSessionTracingInput,
   event: SessionMetadata,
   decision: ReturnType<typeof resolveTracePolicy>,
 ): SpanContext {
@@ -190,7 +291,7 @@ function initialSessionContext(
 }
 
 function freshTurnContext(
-  input: AgentOtelSessionContextInput,
+  input: EveSessionTracingInput,
   idempotencyKey: string,
   decision: AgentSessionTraceState["decision"],
 ): SpanContext {

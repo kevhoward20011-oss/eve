@@ -5,7 +5,7 @@ import {
   genAiSystemInstructionsAttribute,
   genAiOutputMessagesAttribute,
   toolResultsContentAttribute,
-} from "#tracing/agent-otel-content.js";
+} from "#tracing/adapters/serialization.js";
 import type { ContentSerializer } from "#tracing/core/model.js";
 
 export const aiSdkContentSerializer: ContentSerializer = {

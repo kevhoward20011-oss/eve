@@ -3,11 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { FrameworkMessageKind } from "#harness/messages.js";
 import {
   CONTENT_ATTRIBUTE_LIMIT,
-  genAiInputMessagesAttribute,
   genAiOutputMessagesAttribute,
   genAiSystemInstructionsAttribute,
   toolResultsContentAttribute,
-} from "#tracing/agent-otel-content.js";
+} from "#tracing/adapters/serialization.js";
+import { eveContentSerializer } from "#tracing/adapters/eve/serializer.js";
+const genAiInputMessagesAttribute = eveContentSerializer.inputMessages;
 
 const FRAMEWORK_MESSAGE_KINDS = [
   "context.instruction",

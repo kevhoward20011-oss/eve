@@ -1,7 +1,13 @@
 import type { ScopeData, ScopeRecord } from "#tracing/core/scopes.js";
 import type { TraceLink, TraceReference } from "#tracing/core/types.js";
 import { resolveConversationId } from "#shared/conversation-identity.js";
-import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
+export function traceSessionIdOf(scope: {
+  readonly traceSessionId?: string;
+  readonly rootSessionId?: string;
+  readonly sessionId: string;
+}): string {
+  return scope.traceSessionId ?? scope.rootSessionId ?? scope.sessionId;
+}
 
 export function checkpointContent(value: string | undefined): unknown {
   if (value === undefined) return undefined;
